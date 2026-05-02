@@ -1,4 +1,4 @@
-# Student Feedback Minority UI (React)
+# Feedback Atlas — React dashboard
 
 ## Run locally
 

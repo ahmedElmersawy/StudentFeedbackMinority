@@ -1,4 +1,4 @@
-# Training + Demo
+# Feedback Atlas — training + demo
 
 ## 1) Install dependencies
 
