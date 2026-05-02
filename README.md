@@ -1,4 +1,4 @@
-# Feedback Atlas — training + demo
+# Feedback Atlas training + demo
 
 Repository: [github.com/ahmedElmersawy/feedback-atlas](https://github.com/ahmedElmersawy/feedback-atlas) (create the empty repo on GitHub first, then `git push -u origin main` from this folder).
 
