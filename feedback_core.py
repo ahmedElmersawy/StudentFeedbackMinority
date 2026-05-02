@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -89,6 +90,28 @@ def load_classifier(model_path: Path):
     if not metadata.get("id2label"):
         raise ValueError("Could not read id2label from model config or label_mappings.json.")
     return tokenizer, model, metadata
+
+
+def resolve_classifier_dir(user_input: str | None = None) -> Path:
+    """Resolve the Hugging Face classifier folder on disk.
+
+    Precedence: ``FEEDBACK_MODEL_DIR`` environment variable, else *user_input*,
+    else ``final_feedback_classifier``. Relative paths are tried under the repo
+    root (directory containing this file) and under the process current working
+    directory, so local and Streamlit Cloud layouts both work when the folder
+    is committed next to ``app.py``.
+    """
+    env = os.environ.get("FEEDBACK_MODEL_DIR", "").strip()
+    raw = env or (user_input or "").strip() or "final_feedback_classifier"
+    p = Path(raw).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    repo_root = Path(__file__).resolve().parent
+    for root in (repo_root, Path.cwd()):
+        cand = (root / p).resolve()
+        if cand.is_dir() and (cand / "config.json").is_file():
+            return cand
+    return (repo_root / p).resolve()
 
 
 def predict_dataframe(

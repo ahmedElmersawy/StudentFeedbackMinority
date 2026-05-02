@@ -1,0 +1,23 @@
+{
+  "csv_path": "studentdataset.csv",
+  "text_cols": [
+    "teaching.1",
+    "coursecontent.1",
+    "Examination",
+    "labwork.1",
+    " library_facilities",
+    "extracurricular.1"
+  ],
+  "label_col": "teaching",
+  "label2id": {
+    "-1": 0,
+    "0": 1,
+    "1": 2
+  },
+  "id2label": {
+    "0": "-1",
+    "1": "0",
+    "2": "1"
+  },
+  "model_name": "distilroberta-base"
+}

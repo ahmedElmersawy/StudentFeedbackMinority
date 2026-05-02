@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import numpy as np
@@ -366,21 +367,59 @@ if "show_minority_table" not in st.session_state:
     st.session_state.show_minority_table = False
 if "show_all_predictions" not in st.session_state:
     st.session_state.show_all_predictions = False
+if "model_dir_input" not in st.session_state:
+    st.session_state.model_dir_input = os.environ.get("FEEDBACK_MODEL_DIR", "final_feedback_classifier").strip() or "final_feedback_classifier"
+
+# Auto-load when FEEDBACK_MODEL_DIR is set (e.g. Streamlit Cloud / Docker env).
+if (
+    not st.session_state.model_loaded
+    and not st.session_state.get("_autoloaded_env_model")
+    and os.environ.get("FEEDBACK_MODEL_DIR", "").strip()
+):
+    st.session_state._autoloaded_env_model = True
+    try:
+        auto_path = fc.resolve_classifier_dir(None)
+        if auto_path.is_dir() and list(auto_path.glob("config.json")):
+            tok, mdl, meta = fc.load_classifier(auto_path)
+            st.session_state.tokenizer = tok
+            st.session_state.model = mdl
+            st.session_state.metadata = meta
+            st.session_state.model_loaded = True
+            st.session_state.model_dir_input = str(auto_path)
+            reset_prediction_minority_state()
+    except Exception:
+        pass
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### ⬡ Model")
     model_dir = st.text_input(
         "Model folder",
-        "final_feedback_classifier",
-        help="Path to a Hugging Face–style classifier folder.",
+        key="model_dir_input",
+        help="Relative folder in the repo, or an absolute path. On deploy, set env FEEDBACK_MODEL_DIR or ship this folder in Git (see README).",
         label_visibility="collapsed",
         placeholder="Model folder path…",
     )
     if st.button("Load model", type="primary"):
-        model_path = Path(model_dir).resolve()
+        model_path = fc.resolve_classifier_dir(model_dir)
         if not model_path.is_dir():
             st.error("That folder path does not exist.")
+            st.markdown(
+                """
+**Why this happens on Streamlit Cloud:** the trained weights live in
+`final_feedback_classifier/` on your laptop, but that folder is usually **not**
+in GitHub (large files / `.gitignore`), so the cloud app has nothing to load.
+
+**Fix (pick one):**
+
+1. **Commit the model** into the repo (use [Git LFS](https://git-lfs.github.com/) for `*.safetensors`), **or**
+2. In Streamlit **App settings → Environment variables**, set  
+   `FEEDBACK_MODEL_DIR` to an **absolute** path if your host mounts the model, **or**
+3. Run locally / on a VPS where you copied `final_feedback_classifier/`.
+
+See **`DEPLOY.md`** in the repository for Docker, Reflex, and Streamlit model options.
+                """.strip(),
+            )
         elif not list(model_path.glob("config.json")):
             st.error("No Transformer model found (missing config.json).")
         else:
@@ -426,7 +465,8 @@ if not st.session_state.model_loaded:
     st.info(
         "**Get started:** set the model folder in the sidebar → click **Load model**. "
         "Run `studentfeedback_analysis.py` first if you need to create `final_feedback_classifier/`. "
-        "Then upload your CSV — text columns are detected automatically."
+        "On **Streamlit Cloud**, that folder must exist in the deployed repo or set **`FEEDBACK_MODEL_DIR`** "
+        "(see `DEPLOY.md`). Then upload your CSV — text columns are detected automatically."
     )
     st.stop()
 

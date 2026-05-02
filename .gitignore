@@ -42,8 +42,10 @@ minority_patterns.csv
 minority_patterns.json
 *_detected.csv
 
-# --- Trained model folders (large; train locally or attach via release / LFS) ---
-final_feedback_classifier/
+# --- Trained model folders ---
+# `final_feedback_classifier/` is tracked (weights via Git LFS — see `.gitattributes`).
+# Optional: omit bulky training checkpoints from Git (inference uses root `model.safetensors`).
+final_feedback_classifier/checkpoint-*/
 final_feedback_classifier_v2/
 feedback_model/
 

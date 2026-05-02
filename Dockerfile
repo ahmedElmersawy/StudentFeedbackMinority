@@ -15,8 +15,9 @@ RUN pip install --no-cache-dir -U pip \
 COPY rxconfig.py feedback_core.py ./
 COPY feedback_web ./feedback_web/
 
-# Optional: bake a small classifier into the image (uncomment if repo includes it).
-# COPY final_feedback_classifier ./final_feedback_classifier/
+# Classifier baked into image (same layout as local training output).
+COPY final_feedback_classifier ./final_feedback_classifier/
+ENV FEEDBACK_MODEL_DIR=/app/final_feedback_classifier
 
 ARG API_URL=
 ENV API_URL=${API_URL}

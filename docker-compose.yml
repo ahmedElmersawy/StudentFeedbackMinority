@@ -1,0 +1,34 @@
+# Local / VPS: Streamlit with classifier mounted from disk (no weights in image).
+#
+#   docker compose up --build
+#   → http://localhost:8501
+#
+# Requires `./final_feedback_classifier/` next to this file (your trained export).
+
+services:
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    ports:
+      - "8501:8501"
+    environment:
+      FEEDBACK_MODEL_DIR: /models/classifier
+    volumes:
+      - ./final_feedback_classifier:/models/classifier:ro
+
+  # Reflex UI + API (bakes model from repo via main Dockerfile).
+  reflex:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        API_URL: ${API_URL:-http://127.0.0.1:8000}
+    ports:
+      - "3000:3000"
+      - "8000:8000"
+    environment:
+      API_URL: ${API_URL:-http://127.0.0.1:8000}
+      FEEDBACK_MODEL_DIR: /app/final_feedback_classifier
+    profiles:
+      - reflex

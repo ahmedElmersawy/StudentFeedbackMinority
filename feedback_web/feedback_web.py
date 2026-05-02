@@ -34,20 +34,8 @@ def paths_from_run_id(run_id: str) -> tuple[Path, Path, Path, Path]:
 
 
 def resolve_model_dir(user_input: str) -> Path:
-    """Resolve classifier folder: env override, then user path, then repo-relative."""
-    env = os.environ.get("FEEDBACK_MODEL_DIR", "").strip()
-    if env:
-        return Path(env).expanduser().resolve()
-    raw = (user_input or "final_feedback_classifier").strip()
-    p = Path(raw).expanduser()
-    if p.is_absolute() and p.is_dir():
-        return p.resolve()
-    repo_root = Path(__file__).resolve().parent.parent
-    for root in (repo_root, Path.cwd()):
-        cand = (root / raw).resolve()
-        if cand.is_dir() and (cand / "config.json").exists():
-            return cand
-    return (Path.cwd() / raw).resolve()
+    """Resolve classifier folder (same rules as ``feedback_core.resolve_classifier_dir``)."""
+    return fc.resolve_classifier_dir(user_input or None)
 
 
 class State(rx.State):
