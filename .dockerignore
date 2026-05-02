@@ -1,0 +1,15 @@
+.venv
+.web
+.git
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.cursor
+terminals
+uploaded_files
+states
+frontend.zip
+backend.zip
+feedback_model
+final_feedback_classifier_v2
