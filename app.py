@@ -538,7 +538,10 @@ with st.expander("Detected column mapping", expanded=True):
         st.dataframe(df.head(8), use_container_width=True, height=240)
 
 if not selected_text_cols:
-    st.error("Could not auto-detect feedback text columns. Ensure the CSV has text-heavy columns.")
+    st.error(
+        "Could not auto-detect feedback text columns. "
+        "Please upload a CSV that contains at least one narrative/comment-style column."
+    )
     st.stop()
 
 combined_text = fc.combined_text_series(df, selected_text_cols)

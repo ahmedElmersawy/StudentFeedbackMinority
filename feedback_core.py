@@ -269,8 +269,29 @@ def auto_detect_text_columns(
     candidates.sort(key=lambda x: -x[0])
     out = [c for _, c in candidates[:max_cols]]
     if not out:
-        objs = [c for c in available if is_string_like(c)]
+        # Fallback 1: keep string-like columns except obvious identifiers.
+        objs = []
+        for c in available:
+            if not is_string_like(c):
+                continue
+            cl = c.lower().strip()
+            if cl in ("id", "uuid") or cl.endswith("_id") or cl.startswith("unnamed"):
+                continue
+            objs.append(c)
         out = objs[: min(6, max_cols)]
+
+    if not out:
+        # Fallback 2: last resort for datasets that were typed as numeric/categorical
+        # despite being semantically text-like after CSV parsing.
+        broad: list[tuple[float, str]] = []
+        for c in available:
+            cl = c.lower().strip()
+            if cl in ("id", "uuid") or cl.endswith("_id") or cl.startswith("unnamed"):
+                continue
+            mlen = _mean_text_len(df[c].astype(str))
+            broad.append((mlen, c))
+        broad.sort(key=lambda x: -x[0])
+        out = [c for _, c in broad[: min(3, max_cols)]]
     return out
 
 
