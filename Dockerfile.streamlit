@@ -1,0 +1,25 @@
+# Streamlit only — mount weights at runtime, or bake COPY in for a self-contained image.
+FROM python:3.12-bookworm
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -U pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+COPY app.py feedback_core.py ./
+COPY .streamlit/ ./.streamlit/
+
+# Default: expect a volume at /models/classifier (see docker-compose.yml).
+# For a self-contained image, uncomment the next line and set FEEDBACK_MODEL_DIR=/app/final_feedback_classifier
+# COPY final_feedback_classifier ./final_feedback_classifier/
+
+ENV FEEDBACK_MODEL_DIR=/models/classifier
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
