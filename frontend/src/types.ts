@@ -1,51 +1,47 @@
-export type RowLabel = "majority" | "minority" | "needs_review";
+/** API result types — mirrors backend response shapes. */
 
-export interface DetectionRow {
-  id: string;
-  feedback: string;
-  label: RowLabel;
-  confidence: number;
-  theme: string;
-}
-
-export interface ThemeCount {
-  name: string;
-  count: number;
-}
-
-export interface RatingByLabel {
-  label: RowLabel;
-  avgRating: number;
-  count: number;
-}
-
-export interface TrendPoint {
-  period: string;
-  minority: number;
-  majority: number;
-}
-
-export interface DetectionSummary {
+export interface SummaryStats {
   total: number;
-  majority: number;
   minority: number;
-  needsReview: number;
-  minorityPct: number;
-  majorityThemes: ThemeCount[];
-  minorityThemes: ThemeCount[];
-  ratingByLabel?: RatingByLabel[];
-  trend?: TrendPoint[];
+  minority_pct: number;
+  needs_review: number;
+  review_pct: number;
+  mismatch: number;
+  mismatch_pct: number;
+  avg_confidence: number;
+  label_distribution: Record<string, number>;
+  minority_category_breakdown: Record<string, number>;
 }
 
-export interface DetectionResponse {
-  rows: DetectionRow[];
-  summary: DetectionSummary;
+export interface ResultRow {
+  text?: string;
+  feedback?: string;
+  prediction?: string;
+  confidence?: number;
+  needs_review?: boolean | number;
+  is_minority_pattern?: boolean | number;
+  is_outlier?: boolean | number;
+  is_minority_cluster?: boolean | number;
+  minority_category?: string;
+  cluster_id?: number;
+  mismatch_flag?: boolean | number;
+  mismatch_type?: string;
+  [key: string]: unknown;
 }
 
-export interface ParsedDataset {
-  headers: string[];
-  rows: Record<string, string>[];
-  suggestedFeedbackColumns: string[];
-  suggestedRatingColumn: string | null;
-  suggestedDateColumn: string | null;
+export interface AnalysisResult {
+  summary: SummaryStats;
+  rows: ResultRow[];
 }
+
+export interface JobStatus {
+  job_id: string;
+  status: "pending" | "running" | "done" | "error";
+  message: string;
+  rows_processed: number;
+  total_rows: number;
+}
+
+export type Phase = "idle" | "uploading" | "running" | "done" | "error";
+
+export type TabId = "overview" | "results" | "minority" | "mismatch" | "review";

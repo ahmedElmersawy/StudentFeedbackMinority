@@ -1,0 +1,13 @@
+# Training-only requirements (no FastAPI/web deps needed on the cluster)
+torch>=2.1.0
+transformers>=4.46.0
+datasets>=2.21.0
+sentence-transformers>=3.3.0
+scikit-learn>=1.5.0
+pandas>=2.2.0
+numpy>=1.26.0
+hdbscan>=0.8.40
+spacy>=3.8.0
+pyyaml>=6.0.2
+tqdm>=4.67.0
+accelerate>=0.34.0

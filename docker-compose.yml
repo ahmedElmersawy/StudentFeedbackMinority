@@ -1,11 +1,47 @@
-# Local / VPS: Streamlit with classifier mounted from disk (no weights in image).
+# Feedback Atlas — full stack (FastAPI backend + React frontend)
 #
 #   docker compose up --build
-#   → http://localhost:8501
+#   → Frontend:  http://localhost:5173
+#   → API docs:  http://localhost:8000/docs
 #
-# Requires `./final_feedback_classifier/` next to this file (your trained export).
+# Requires ./final_feedback_classifier/ next to this file (trained model).
 
 services:
+  # ── FastAPI backend ───────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      FEEDBACK_MODEL_DIR: /app/final_feedback_classifier
+      CORS_ORIGINS: "http://localhost:5173,http://localhost:80,http://frontend"
+    volumes:
+      - ./final_feedback_classifier:/app/final_feedback_classifier:ro
+      - ./catme_feedback_classifier:/app/catme_feedback_classifier:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── React frontend ────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_URL: "http://localhost:8000"
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Streamlit (legacy, optional) ─────────────────────────────────────────
   streamlit:
     build:
       context: .
@@ -16,19 +52,5 @@ services:
       FEEDBACK_MODEL_DIR: /models/classifier
     volumes:
       - ./final_feedback_classifier:/models/classifier:ro
-
-  # Reflex UI + API (bakes model from repo via main Dockerfile).
-  reflex:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        API_URL: ${API_URL:-http://127.0.0.1:8000}
-    ports:
-      - "3000:3000"
-      - "8000:8000"
-    environment:
-      API_URL: ${API_URL:-http://127.0.0.1:8000}
-      FEEDBACK_MODEL_DIR: /app/final_feedback_classifier
     profiles:
-      - reflex
+      - streamlit
