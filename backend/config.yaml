@@ -1,0 +1,247 @@
+model:
+  base_model: "distilroberta-base"
+  max_length: 256
+  batch_size: 32
+  output_dir: "../final_feedback_classifier"
+  catme_output_dir: "../catme_feedback_classifier"
+
+training:
+  num_epochs: 15
+  batch_size: 16
+  learning_rate: 3.0e-5
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  early_stopping_patience: 4
+  test_size: 0.2
+  random_state: 42
+  fp16: true
+  undersample_ratio: 5  # cap dominant class at 5× the second-largest class
+
+embeddings:
+  model: "all-MiniLM-L6-v2"
+  batch_size: 64
+
+minority_detection:
+  contamination: 0.08
+  n_estimators: 200
+  dbscan_eps: 0.75
+  dbscan_min_samples: 5
+  min_cluster_size: 10
+  include_dbscan_noise: false
+
+zero_shot:
+  model: "facebook/bart-large-mnli"
+  batch_size: 32
+  confidence_threshold: 0.5
+  cache_path: "../zero_shot_labels_cache.json"
+
+mismatch:
+  high_rating_threshold: 3.8
+  low_rating_threshold: 2.5
+
+review_queue:
+  confidence_threshold: 0.65
+
+anonymization:
+  placeholder: "[STUDENT]"
+  spacy_model: "en_core_web_sm"
+
+labels:
+  course:
+    - "Positive_Teaching"
+    - "Positive_Content"
+    - "Positive_Support"
+    - "Negative_Teaching"
+    - "Negative_Workload"
+    - "Negative_Assessment"
+    - "Negative_Support"
+    - "Neutral"
+  peer:
+    - "Positive_Contribution"
+    - "Positive_Communication"
+    - "Positive_Leadership"
+    - "Positive_Reliability"
+    - "Negative_Contribution"
+    - "Negative_Communication"
+    - "Negative_Reliability"
+    - "Constructive"
+  broad:
+    - "Positive"
+    - "Neutral"
+    - "Negative"
+
+minority_categories:
+  - "International_Student"
+  - "First_Generation"
+  - "Disability_Accessibility"
+  - "Financial_Hardship"
+  - "Racial_Ethnic_Minority"
+  - "Gender_Identity"
+  - "Mental_Health"
+  - "International_Academic_Background"
+  - "Caregiver"
+  - "Statistical_Outlier_Only"
+
+minority_keywords:
+  International_Student:
+    # self-reported (course feedback)
+    - "international"
+    - "language barrier"
+    - "cultural difference"
+    - "visa"
+    - "english as second language"
+    - "esl"
+    - "native language"
+    - "back home"
+    - "my country"
+    - "foreign student"
+    # peer-written (CATME)
+    - "struggles with english"
+    - "hard to understand"
+    - "accent made it difficult"
+    - "different cultural background"
+    - "not fluent"
+    - "communication barrier"
+    - "from another country"
+    - "english is not their"
+    - "language difficulties"
+  First_Generation:
+    # self-reported (course feedback)
+    - "first generation"
+    - "first in family"
+    - "first in my family"
+    - "parents didn't go to college"
+    - "unfamiliar with university"
+    - "feeling out of place"
+    - "imposter syndrome"
+    - "first to attend"
+    - "don't belong"
+    # peer-written (CATME) — rare but possible
+    - "seemed unfamiliar with how college works"
+    - "unsure how to navigate"
+  Disability_Accessibility:
+    # self-reported (course feedback)
+    - "accommodation"
+    - "disability"
+    - "adhd"
+    - "accessibility"
+    - "disability services"
+    - "learning disability"
+    - "physical disability"
+    - "hearing impaired"
+    - "vision impaired"
+    - "drc"
+    # peer-written (CATME)
+    - "has a disability"
+    - "needed accommodations"
+    - "health issue"
+    - "medical issue"
+    - "chronic illness"
+    - "mobility issue"
+  Financial_Hardship:
+    # self-reported (course feedback)
+    - "financial"
+    - "textbook cost"
+    - "working multiple jobs"
+    - "financial aid"
+    - "food insecurity"
+    - "can't afford"
+    - "cost of textbook"
+    - "paying for school"
+    - "broke"
+    - "scholarship"
+    # peer-written (CATME)
+    - "works a lot"
+    - "has to work"
+    - "had a job"
+    - "multiple jobs"
+    - "couldn't afford"
+    - "financial stress"
+  Racial_Ethnic_Minority:
+    # self-reported (course feedback)
+    - "race"
+    - "ethnicity"
+    - "only one in"
+    - "representation"
+    - "discrimination"
+    - "minority student"
+    - "underrepresented"
+    - "racism"
+    - "microaggression"
+    # peer-written (CATME)
+    - "felt excluded"
+    - "left out of discussions"
+    - "treated differently"
+    - "bias"
+    - "not included"
+  Gender_Identity:
+    # self-reported (course feedback)
+    - "gender"
+    - "pronouns"
+    - "sexism"
+    - "sexual harassment"
+    - "inclusion"
+    - "woman in stem"
+    - "lgbtq"
+    - "non-binary"
+    - "transgender"
+    # peer-written (CATME)
+    - "she was ignored"
+    - "he was dismissive"
+    - "talked over"
+    - "voice wasn't heard"
+    - "not taken seriously"
+  Mental_Health:
+    # self-reported (course feedback)
+    - "anxiety"
+    - "depression"
+    - "mental health"
+    - "burnout"
+    - "overwhelmed"
+    - "therapy"
+    - "counseling"
+    - "struggling mentally"
+    - "sense of belonging"
+    - "stress"
+    # peer-written (CATME)
+    - "seemed overwhelmed"
+    - "appeared stressed"
+    - "was going through a hard time"
+    - "personal issues"
+    - "dealing with something"
+    - "not doing well"
+    - "seemed to be struggling"
+    - "withdrawn"
+    - "disengaged"
+    - "checked out"
+  International_Academic_Background:
+    # self-reported (course feedback)
+    - "community college"
+    - "different education system"
+    - "preparation gap"
+    - "transfer student"
+    - "high school didn't prepare"
+    - "not prepared for"
+    - "catching up"
+    # peer-written (CATME)
+    - "different background"
+    - "seemed less prepared"
+    - "transfer"
+    - "came from a different program"
+  Caregiver:
+    # self-reported (course feedback)
+    - "family responsibilities"
+    - "single parent"
+    - "caring for"
+    - "caregiver"
+    - "child care"
+    - "my children"
+    - "sick family member"
+    - "dependents"
+    # peer-written (CATME)
+    - "family situation"
+    - "family emergency"
+    - "had to take care of"
+    - "family obligations"
+    - "personal family"
+    - "missed meetings for family"
