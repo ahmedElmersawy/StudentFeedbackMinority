@@ -12,17 +12,27 @@
   "hidden_dropout_prob": 0.1,
   "hidden_size": 768,
   "id2label": {
-    "0": "Negative",
-    "1": "Neutral",
-    "2": "Positive"
+    "0": "Constructive",
+    "1": "Negative_Communication",
+    "2": "Negative_Contribution",
+    "3": "Negative_Reliability",
+    "4": "Positive_Communication",
+    "5": "Positive_Contribution",
+    "6": "Positive_Leadership",
+    "7": "Positive_Reliability"
   },
   "initializer_range": 0.02,
   "intermediate_size": 3072,
   "is_decoder": false,
   "label2id": {
-    "Negative": 0,
-    "Neutral": 1,
-    "Positive": 2
+    "Constructive": 0,
+    "Negative_Communication": 1,
+    "Negative_Contribution": 2,
+    "Negative_Reliability": 3,
+    "Positive_Communication": 4,
+    "Positive_Contribution": 5,
+    "Positive_Leadership": 6,
+    "Positive_Reliability": 7
   },
   "layer_norm_eps": 1e-05,
   "max_position_embeddings": 514,

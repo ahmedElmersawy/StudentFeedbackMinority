@@ -1,4 +1,4 @@
-# Git LFS — large Hugging Face / PyTorch artifacts under the shipped classifier
-# (Streamlit Cloud + GitHub size limits; tokenizer JSON stays normal Git.)
-final_feedback_classifier/**/*.safetensors filter=lfs diff=lfs merge=lfs -text
-final_feedback_classifier/**/*.bin filter=lfs diff=lfs merge=lfs -text
+# Git LFS — large model artifacts (safetensors + bin) for all classifiers
+# tokenizer JSON and config stay in regular git
+*_feedback_classifier/**/*.safetensors filter=lfs diff=lfs merge=lfs -text
+*_feedback_classifier/**/*.bin filter=lfs diff=lfs merge=lfs -text

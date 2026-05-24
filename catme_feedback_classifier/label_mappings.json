@@ -1,0 +1,22 @@
+{
+  "label2id": {
+    "Constructive": 0,
+    "Negative_Communication": 1,
+    "Negative_Contribution": 2,
+    "Negative_Reliability": 3,
+    "Positive_Communication": 4,
+    "Positive_Contribution": 5,
+    "Positive_Leadership": 6,
+    "Positive_Reliability": 7
+  },
+  "id2label": {
+    "0": "Constructive",
+    "1": "Negative_Communication",
+    "2": "Negative_Contribution",
+    "3": "Negative_Reliability",
+    "4": "Positive_Communication",
+    "5": "Positive_Contribution",
+    "6": "Positive_Leadership",
+    "7": "Positive_Reliability"
+  }
+}

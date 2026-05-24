@@ -1,23 +1,20 @@
 {
-  "csv_path": "studentdataset.csv",
+  "source_csv": "studentdataset.csv",
   "text_cols": [
     "teaching.1",
-    "coursecontent.1",
     "Examination",
+    "coursecontent.1",
     "labwork.1",
-    " library_facilities",
-    "extracurricular.1"
+    "extracurricular.1",
+    " library_facilities"
   ],
-  "label_col": "teaching",
-  "label2id": {
-    "-1": 0,
-    "0": 1,
-    "1": 2
-  },
-  "id2label": {
-    "0": "-1",
-    "1": "0",
-    "2": "1"
-  },
-  "model_name": "distilroberta-base"
+  "label_strategy": "rating",
+  "num_labels": 3,
+  "labels": [
+    "Negative",
+    "Neutral",
+    "Positive"
+  ],
+  "eval_f1_macro": 0.5370370370370371,
+  "eval_minority_f1_mean": 0.45
 }

@@ -1,0 +1,20 @@
+{
+  "source_csv": "CATMEcomments_Training.csv",
+  "text_cols": [
+    "text"
+  ],
+  "label_strategy": "zero_shot",
+  "num_labels": 8,
+  "labels": [
+    "Constructive",
+    "Negative_Communication",
+    "Negative_Contribution",
+    "Negative_Reliability",
+    "Positive_Communication",
+    "Positive_Contribution",
+    "Positive_Leadership",
+    "Positive_Reliability"
+  ],
+  "eval_f1_macro": 0.6294167329878497,
+  "eval_minority_f1_mean": 0.5919766548039946
+}
