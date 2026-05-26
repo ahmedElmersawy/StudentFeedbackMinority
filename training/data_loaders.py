@@ -161,6 +161,136 @@ def load_rmp(
 
 
 # ---------------------------------------------------------------------------
+# Dimension-constrained zero-shot labels for courseeval
+# ---------------------------------------------------------------------------
+
+# Maps (dimension, rating_bucket) → subset of professor zero-shot candidate strings.
+# Using a narrow candidate set per dimension makes BART-MNLI far more accurate
+# than asking it to pick from all 24 labels at once.
+_DIMENSION_CANDIDATES: dict[tuple[str, str], list[str]] = {
+    ("teaching", "positive"):     ["professor explains clearly and teaches well",
+                                   "professor is engaging and passionate"],
+    ("teaching", "neutral"):      ["professor explains clearly and teaches well",
+                                   "professor is hard to follow or reads from slides",
+                                   "course pace is too fast or disorganized"],
+    ("teaching", "negative"):     ["professor is hard to follow or reads from slides",
+                                   "course pace is too fast or disorganized",
+                                   "teaching excludes students from certain backgrounds"],
+    ("coursecontent", "positive"): ["course content is relevant and up to date",
+                                    "course content is rigorous and comprehensive"],
+    ("coursecontent", "neutral"):  ["course content is relevant and up to date",
+                                    "course content is outdated or misaligned with exams",
+                                    "course content does not match what is tested on exams"],
+    ("coursecontent", "negative"): ["course content is outdated or misaligned with exams",
+                                    "course content does not match what is tested on exams",
+                                    "course content assumes prior knowledge not listed"],
+    ("examination", "positive"):  ["exam is fair and reflects what was taught"],
+    ("examination", "neutral"):   ["exam is fair and reflects what was taught",
+                                   "exam has bad weighting or no partial credit"],
+    ("examination", "negative"):  ["exam is unfair or tests untaught material",
+                                   "exam has bad weighting or no partial credit",
+                                   "accommodation or accessibility failure in exam"],
+    ("labwork", "positive"):      ["lab is hands-on and well organized"],
+    ("labwork", "neutral"):       ["lab is hands-on and well organized",
+                                   "lab equipment is broken or instructions are unclear"],
+    ("labwork", "negative"):      ["lab equipment is broken or instructions are unclear",
+                                   "lab is poorly organized or sessions are badly scheduled",
+                                   "lab scheduling or location creates barriers"],
+    ("library", "positive"):      ["generic positive feedback about the course"],
+    ("library", "neutral"):       ["generic positive feedback about the course"],
+    ("library", "negative"):      ["accommodation or accessibility failure in exam",
+                                   "generic positive feedback about the course"],
+    ("extracurricular", "positive"): ["generic positive feedback about the course"],
+    ("extracurricular", "neutral"):  ["generic positive feedback about the course"],
+    ("extracurricular", "negative"): ["generic positive feedback about the course"],
+}
+
+
+def _rating_bucket(r) -> str:
+    try:
+        v = float(r)
+    except (TypeError, ValueError):
+        return "neutral"
+    if v > 0:
+        return "positive"
+    if v < 0:
+        return "negative"
+    return "neutral"
+
+
+def load_courseeval_labeled(
+    filepath: str | Path | None = None,
+    cfg: dict | None = None,
+    cache_path: str | Path | None = None,
+    zs_model: str = "facebook/bart-large-mnli",
+    batch_size: int = 32,
+) -> pd.DataFrame:
+    """
+    Load Purdue courseeval, run dimension-constrained zero-shot labeling,
+    and return a labeled DataFrame ready to combine with RMP for training.
+
+    Uses a narrow candidate set per (dimension, rating_bucket) so BART-MNLI
+    picks from 2-3 relevant candidates instead of all 24, giving much higher accuracy.
+
+    Returns DataFrame with 'text', 'sentiment', 'dimension', 'mode', 'source'.
+    """
+    import json
+    import torch
+    from transformers import pipeline as hf_pipeline
+
+    df = load_courseeval(filepath)
+
+    cfg = cfg or {}
+    label_map = cfg.get("zero_shot_label_map", {}).get("professor", {})
+    cache_file = Path(cache_path or (_PROJECT_ROOT / "zero_shot_cache_courseeval.json"))
+
+    cached: dict[str, str] = {}
+    if cache_file.exists():
+        with open(cache_file, encoding="utf-8") as f:
+            cached = json.load(f)
+        logger.info("[courseeval-zs] Loaded %d cached labels.", len(cached))
+
+    device = 0 if torch.cuda.is_available() else -1
+    zs = hf_pipeline("zero-shot-classification", model=zs_model, device=device)
+
+    labels_out: list[str] = []
+    for _, row in df.iterrows():
+        text = str(row["text"]).strip()
+        dim = str(row.get("dimension", "teaching")).lower()
+        bucket = _rating_bucket(row.get("rating"))
+
+        if text in cached:
+            labels_out.append(cached[text])
+            continue
+
+        key = (dim, bucket)
+        candidates = _DIMENSION_CANDIDATES.get(key, ["generic positive feedback about the course"])
+        if len(candidates) == 1:
+            # Only one option — no need to run model
+            winner = label_map.get(candidates[0], "Majority_Positive")
+        else:
+            result = zs(text, candidates, multi_label=False)
+            top = result["labels"][0]
+            winner = label_map.get(top, "Majority_Positive")
+
+        cached[text] = winner
+        labels_out.append(winner)
+
+    with open(cache_file, "w", encoding="utf-8") as f:
+        json.dump(cached, f)
+
+    df = df.copy()
+    df["sentiment"] = labels_out
+    df["source"] = "courseeval_labeled"
+    logger.info(
+        "[courseeval-zs] Labeled %d rows. Distribution: %s",
+        len(df),
+        df["sentiment"].value_counts().to_dict(),
+    )
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Combined professor training set
 # ---------------------------------------------------------------------------
 
@@ -168,12 +298,40 @@ def load_professor_combined(
     rmp_path: str | Path | None = None,
     courseeval_path: str | Path | None = None,
     rmp_n_per_class: int = 50_000,
+    cfg: dict | None = None,
+    include_courseeval_in_train: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Returns (train_df, val_df) where:
-      train_df = RMP sample (for fine-tuning)
-      val_df   = courseeval (held-out Purdue validation — do NOT train on)
+    Returns (train_df, val_df).
+
+    train_df = RMP sample (full 24-class zero-shot) +
+               courseeval labeled rows (dimension-constrained zero-shot)
+               — training on both gives the model real university language.
+
+    val_df   = held-out 20% of courseeval (never seen during training).
+
+    include_courseeval_in_train=True is the default and recommended setting.
+    Set to False to revert to the old RMP-only training.
     """
-    train_df = load_rmp(rmp_path, n_per_class=rmp_n_per_class)
-    val_df = load_courseeval(courseeval_path)
-    return train_df, val_df
+    from sklearn.model_selection import train_test_split
+
+    rmp_df = load_rmp(rmp_path, n_per_class=rmp_n_per_class)
+
+    ce_df = load_courseeval(courseeval_path)
+    # Split courseeval: 80% train, 20% val
+    ce_train, ce_val = train_test_split(ce_df, test_size=0.2, random_state=42)
+
+    if include_courseeval_in_train:
+        # Label the training split with dimension-constrained zero-shot
+        ce_labeled = load_courseeval_labeled(courseeval_path, cfg=cfg)
+        # Keep only the rows that ended up in ce_train (by index)
+        ce_labeled_train = ce_labeled.loc[ce_labeled.index.isin(ce_train.index)].copy()
+        train_df = pd.concat([rmp_df, ce_labeled_train], ignore_index=True)
+        logger.info(
+            "[professor-combined] Training set: %d RMP + %d courseeval = %d total",
+            len(rmp_df), len(ce_labeled_train), len(train_df),
+        )
+    else:
+        train_df = rmp_df
+
+    return train_df, ce_val

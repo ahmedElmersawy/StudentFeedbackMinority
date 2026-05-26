@@ -223,6 +223,43 @@ export function downloadSplitFile(jobId: string, filename: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Aggregate summary — professor/dimension-level view
+// ---------------------------------------------------------------------------
+
+export interface FindingItem {
+  label: string;
+  count: number;
+  pct: number;
+}
+
+export interface EntitySummary {
+  entity: string;
+  group_by: string;
+  total_responses: number;
+  label_counts: Record<string, number>;
+  top_negative_label: string;
+  flagged_findings: FindingItem[];
+  needs_attention: boolean;
+  minority_count: number;
+  avg_priority_score: number;
+}
+
+export interface AggregateResult {
+  job_id: string;
+  feedback_mode: string;
+  entities: EntitySummary[];
+}
+
+export async function fetchAggregate(jobId: string): Promise<AggregateResult> {
+  const res = await fetch(`${BASE}/jobs/${jobId}/aggregate`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Aggregate not available");
+  }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
 // Minority-only detection endpoint
 // ---------------------------------------------------------------------------
 

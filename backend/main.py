@@ -309,6 +309,41 @@ def list_split_files(job_id: str):
     }
 
 
+@app.get("/jobs/{job_id}/aggregate")
+def job_aggregate(job_id: str):
+    """
+    Return professor/dimension-level aggregated summary for a completed job.
+
+    Each row = one professor, course, or feedback dimension with:
+      - total_responses
+      - flagged_findings: labels that ≥ N students mentioned (threshold in config)
+      - needs_attention: true when at least one actionable finding meets threshold
+      - top_negative_label, minority_count, avg_priority_score
+      - label_counts: full label distribution
+
+    This is the primary output for university administrators — it collapses
+    individual comments into actionable patterns per entity.
+    """
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["status"] != "done":
+        raise HTTPException(status_code=409, detail=f"Job not done (status: {job['status']}).")
+
+    from .pipeline import aggregate_by_entity
+    df: pd.DataFrame = job["result_df"]
+    summary = aggregate_by_entity(df)
+
+    if summary.empty:
+        return {"job_id": job_id, "feedback_mode": job.get("feedback_mode"), "entities": []}
+
+    return JSONResponse({
+        "job_id": job_id,
+        "feedback_mode": job.get("feedback_mode"),
+        "entities": summary.to_dict(orient="records"),
+    })
+
+
 # ---------------------------------------------------------------------------
 # /minority — minority detection only
 # ---------------------------------------------------------------------------

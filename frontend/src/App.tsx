@@ -1,6 +1,7 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AnalysisResult, JobStatus, Phase, TabId } from "./types";
-import { uploadCsv, waitForJob, downloadResultsCsv } from "./api/client";
+import { uploadCsv, waitForJob, downloadResultsCsv, fetchAggregate } from "./api/client";
+import type { AggregateResult, EntitySummary } from "./api/client";
 import { UploadPanel } from "./components/UploadPanel";
 import type { UploadOptions } from "./components/UploadPanel";
 import { ResultsTable } from "./components/ResultsTable";
@@ -18,6 +19,7 @@ function cn(...xs: (string | false | undefined)[]) {
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "overview", label: "Overview", icon: "⬡" },
+  { id: "summary", label: "Action Summary", icon: "⊞" },
   { id: "results", label: "All Results", icon: "≡" },
   { id: "minority", label: "Minority Patterns", icon: "◈" },
   { id: "mismatch", label: "Mismatch", icon: "↯" },
@@ -262,6 +264,118 @@ function OverviewTab({ result }: { result: AnalysisResult }) {
 }
 
 // ---------------------------------------------------------------------------
+// Summary (action) tab — professor/dimension aggregated view
+// ---------------------------------------------------------------------------
+
+function AttentionBadge({ on }: { on: boolean }) {
+  return on ? (
+    <span className="rounded-full bg-rose-500/20 px-2 py-0.5 text-[10px] font-semibold text-rose-300">
+      Needs attention
+    </span>
+  ) : (
+    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
+      OK
+    </span>
+  );
+}
+
+function SummaryTab({ aggregate }: { aggregate: AggregateResult | null }) {
+  if (!aggregate) {
+    return (
+      <div className="rounded-xl border border-white/[0.08] bg-[#141928] px-6 py-10 text-center text-sm text-slate-500">
+        Aggregated summary is loading or not available for this dataset.
+      </div>
+    );
+  }
+
+  const entities = aggregate.entities;
+  const needsAttention = entities.filter((e) => e.needs_attention);
+  const ok = entities.filter((e) => !e.needs_attention);
+  const groupBy = entities[0]?.group_by ?? "entity";
+
+  return (
+    <div className="space-y-5">
+      {/* Header stats */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="rounded-xl border border-white/[0.08] bg-[#141928] px-4 py-3">
+          <p className="text-[10px] font-medium uppercase tracking-[0.1em] text-slate-500">
+            {groupBy === "dimension" ? "Dimensions" : "Entities"}
+          </p>
+          <p className="mt-1 text-2xl font-bold text-slate-100">{entities.length}</p>
+        </div>
+        <div className="rounded-xl border border-white/[0.08] bg-[#141928] px-4 py-3">
+          <p className="text-[10px] font-medium uppercase tracking-[0.1em] text-slate-500">Need attention</p>
+          <p className="mt-1 text-2xl font-bold text-rose-300">{needsAttention.length}</p>
+        </div>
+        <div className="rounded-xl border border-white/[0.08] bg-[#141928] px-4 py-3">
+          <p className="text-[10px] font-medium uppercase tracking-[0.1em] text-slate-500">Passing</p>
+          <p className="mt-1 text-2xl font-bold text-emerald-400">{ok.length}</p>
+        </div>
+      </div>
+
+      {/* Entity cards */}
+      <div className="space-y-3">
+        {entities.map((entity: EntitySummary) => (
+          <div
+            key={entity.entity}
+            className={cn(
+              "rounded-2xl border bg-[#141928] p-5",
+              entity.needs_attention ? "border-rose-500/30" : "border-white/[0.06]",
+            )}
+          >
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <p className="text-sm font-semibold capitalize text-slate-100">
+                  {entity.entity.replace(/_/g, " ")}
+                </p>
+                <AttentionBadge on={entity.needs_attention} />
+              </div>
+              <p className="text-[11px] text-slate-600">{entity.total_responses} responses</p>
+            </div>
+
+            {/* Flagged findings */}
+            {entity.flagged_findings.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                  Actionable findings
+                </p>
+                {entity.flagged_findings.map((f) => (
+                  <div key={f.label} className="flex items-center gap-3">
+                    <div className="h-4 flex-1 overflow-hidden rounded bg-white/[0.04]">
+                      <div
+                        className="h-full rounded bg-rose-500/60"
+                        style={{ width: `${Math.min(f.pct, 100)}%` }}
+                      />
+                    </div>
+                    <span className="w-36 shrink-0 truncate text-right text-[11px] text-slate-300">
+                      {f.label.replace(/_/g, " ")}
+                    </span>
+                    <span className="w-20 shrink-0 text-right text-[11px] text-slate-500">
+                      {f.count} students ({f.pct}%)
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-[11px] text-slate-600">
+                No label appears in ≥ 3 responses at ≥ 10% — no systematic issue detected.
+              </p>
+            )}
+
+            {/* Minority count */}
+            {entity.minority_count > 0 && (
+              <p className="mt-2 text-[11px] text-rose-400">
+                {entity.minority_count} minority-pattern response{entity.minority_count > 1 ? "s" : ""} flagged
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main App
 // ---------------------------------------------------------------------------
 
@@ -271,7 +385,16 @@ export default function App() {
   const [jobMessage, setJobMessage] = useState("");
   const [jobProgress, setJobProgress] = useState({ done: 0, total: 0 });
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [aggregate, setAggregate] = useState<AggregateResult | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("overview");
+
+  // Fetch aggregated summary once the job completes
+  useEffect(() => {
+    if (!jobId || phase !== "done") return;
+    fetchAggregate(jobId)
+      .then(setAggregate)
+      .catch(() => setAggregate(null));
+  }, [jobId, phase]);
 
   const handleUpload = useCallback(async (file: File, opts: UploadOptions) => {
     setPhase("uploading");
@@ -313,6 +436,7 @@ export default function App() {
     setJobMessage("");
     setJobProgress({ done: 0, total: 0 });
     setResult(null);
+    setAggregate(null);
     setActiveTab("overview");
   }, []);
 
@@ -441,6 +565,7 @@ export default function App() {
           )}
 
           {result && activeTab === "overview" && <OverviewTab result={result} />}
+          {result && activeTab === "summary" && <SummaryTab aggregate={aggregate} />}
           {result && activeTab === "results" && (
             <ResultsTable
               rows={result.rows}

@@ -261,6 +261,65 @@ def _looks_like_headerless(first_row_value: str) -> bool:
     return len(v) > 30 and " " in v
 
 
+def _melt_professor_dimensions(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """
+    Detect paired (rating_col, text_col) structures like studentdataset.csv and
+    melt them into one row per dimension. Returns None if the pattern is not found.
+
+    Detection: at least 2 numeric columns whose values are all in {-1, 0, 1} paired
+    with adjacent text columns (col.1, Capitalized variant, or leading-space variant).
+    """
+    pairs: list[tuple[str, str, str]] = []  # (rating_col, text_col, dimension_name)
+    checked: set[str] = set()
+
+    col_list = list(df.columns)
+    for col in col_list:
+        if col in checked:
+            continue
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        vals = pd.to_numeric(df[col], errors="coerce").dropna()
+        if len(vals) == 0 or not set(vals.unique()).issubset({-1.0, 0.0, 1.0}):
+            continue
+
+        # Look for a paired text column
+        candidates = [
+            col + ".1",
+            col.capitalize(),
+            " " + col,
+            col + "_text",
+            col + "_comments",
+        ]
+        for text_col in candidates:
+            if text_col in df.columns and text_col not in checked:
+                dim = col.strip().lower().replace(" ", "_")
+                pairs.append((col, text_col, dim))
+                checked.add(col)
+                checked.add(text_col)
+                break
+
+    if len(pairs) < 2:
+        return None
+
+    rows: list[pd.DataFrame] = []
+    for rating_col, text_col, dim in pairs:
+        sub = df[[rating_col, text_col]].copy()
+        sub.columns = ["rating", "text"]
+        sub["dimension"] = dim
+        sub = sub[sub["text"].notna() & (sub["text"].str.strip().str.len() > 5)]
+        rows.append(sub)
+
+    if not rows:
+        return None
+
+    result = pd.concat(rows, ignore_index=True)
+    logger.info(
+        "[pipeline] Courseeval-style CSV detected: %d pairs × %d source rows → %d melted rows",
+        len(pairs), len(df), len(result),
+    )
+    return result
+
+
 def ingest_csv(
     source: Union[str, Path, bytes, io.BytesIO],
     anonymize: bool = True,
@@ -620,6 +679,17 @@ def run_full_pipeline(
     if feedback_mode is None:
         feedback_mode = detect_feedback_mode(df["text"].dropna().tolist())
     logger.info("[pipeline] Feedback mode: %s", feedback_mode)
+
+    # For professor mode: detect paired (rating, text) columns and melt into
+    # one row per dimension. This preserves dimension context (teaching vs exam
+    # vs lab) that would otherwise be lost by concatenating all text into one row.
+    if feedback_mode == "student_to_professor":
+        melted = _melt_professor_dimensions(df)
+        if melted is not None:
+            df = melted
+            # Update rating_col to the standardised 'rating' column from the melt
+            rating_col = "rating"
+
     df["feedback_mode"] = feedback_mode
 
     # CATME subtype detection
@@ -757,6 +827,88 @@ def run_full_pipeline(
 # Output file generation
 # ---------------------------------------------------------------------------
 
+def aggregate_by_entity(
+    df: pd.DataFrame,
+    cfg: Optional[dict] = None,
+) -> pd.DataFrame:
+    """
+    Collapse classified rows into one summary row per professor/dimension/entity.
+
+    Resolution order for the grouping key:
+      1. A column named in cfg.aggregation.entity_id_columns (professor_id, name…)
+      2. 'dimension' column — present when studentdataset.csv is melted
+      3. 'feedback_mode' — fallback (single aggregate for the whole dataset)
+
+    Returns one row per entity with:
+      - total_responses, label_counts (dict), top_negative_label,
+        minority_count, avg_priority_score,
+        flagged_findings (labels that meet the threshold),
+        needs_attention (bool)
+    """
+    cfg = cfg or _cfg()
+    agg_cfg = cfg.get("aggregation", {})
+    threshold = int(agg_cfg.get("min_students_threshold", 3))
+    min_pct = float(agg_cfg.get("min_pct_threshold", 10.0))
+    entity_cols = agg_cfg.get("entity_id_columns", [])
+
+    high = set(cfg.get("priority", {}).get("high", []))
+    medium = set(cfg.get("priority", {}).get("medium", []))
+    actionable = high | medium
+
+    # Choose grouping column
+    group_col: str = "feedback_mode"
+    for col in entity_cols:
+        if col in df.columns:
+            group_col = col
+            break
+    if group_col == "feedback_mode" and "dimension" in df.columns:
+        group_col = "dimension"
+
+    logger.info("[aggregate] Grouping by '%s'", group_col)
+
+    rows: list[dict] = []
+    for entity_id, group in df.groupby(group_col):
+        total = len(group)
+        if total == 0:
+            continue
+
+        label_counts: dict[str, int] = {}
+        if "prediction" in group.columns:
+            label_counts = group["prediction"].value_counts().to_dict()
+
+        # Flagged findings: actionable labels with enough responses
+        findings: list[dict] = []
+        for label, count in label_counts.items():
+            pct = 100.0 * count / total
+            if label in actionable and count >= threshold and pct >= min_pct:
+                findings.append({"label": label, "count": count, "pct": round(pct, 1)})
+        findings.sort(key=lambda x: -x["count"])
+
+        minority_count = int(df.get("is_minority_pattern", pd.Series(dtype=bool)).reindex(group.index).fillna(False).sum()) if "is_minority_pattern" in group.columns else 0
+        avg_priority = float(group["priority_score"].mean()) if "priority_score" in group.columns else 0.0
+
+        top_negative = next(
+            (f["label"] for f in findings if f["label"] in high), None
+        ) or next(
+            (f["label"] for f in findings if f["label"] in medium), None
+        )
+
+        rows.append({
+            "entity": str(entity_id),
+            "group_by": group_col,
+            "total_responses": total,
+            "label_counts": label_counts,
+            "top_negative_label": top_negative or "",
+            "flagged_findings": findings,
+            "needs_attention": len(findings) > 0,
+            "minority_count": minority_count,
+            "avg_priority_score": round(avg_priority, 2),
+        })
+
+    rows.sort(key=lambda r: (-len(r["flagged_findings"]), -r["avg_priority_score"]))
+    return pd.DataFrame(rows)
+
+
 def generate_output_files(
     df: pd.DataFrame,
     output_dir: Union[str, Path],
@@ -824,6 +976,21 @@ def generate_output_files(
         _save("exam_results.csv", df[df["prediction"].str.startswith("Exam_", na=False)])
         _save("lab_results.csv", df[df["prediction"].str.startswith("Lab_", na=False)])
         _save("support_results.csv", df[df["prediction"].str.startswith("Support_", na=False)])
+
+        # Dimension-level summary — the most actionable output for administrators
+        summary_df = aggregate_by_entity(df)
+        if not summary_df.empty:
+            # Flatten flagged_findings list to a readable string for CSV
+            summary_df["flagged_findings_str"] = summary_df["flagged_findings"].apply(
+                lambda fs: "; ".join(f"{f['label']} ({f['count']} students, {f['pct']}%)" for f in fs)
+            )
+            summary_df["label_counts_str"] = summary_df["label_counts"].apply(
+                lambda d: "; ".join(f"{k}: {v}" for k, v in sorted(d.items(), key=lambda x: -x[1])[:8])
+            )
+            cols = ["entity", "total_responses", "needs_attention",
+                    "top_negative_label", "flagged_findings_str",
+                    "minority_count", "avg_priority_score", "label_counts_str"]
+            _save("dimension_summary.csv", summary_df[[c for c in cols if c in summary_df.columns]])
 
     return written
 

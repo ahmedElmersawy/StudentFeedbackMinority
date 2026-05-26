@@ -413,7 +413,7 @@ def _prepare_professor_data(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     from .data_loaders import load_professor_combined
 
-    train_df, val_df = load_professor_combined()
+    train_df, val_df = load_professor_combined(cfg=cfg, include_courseeval_in_train=True)
 
     cfg_zs = cfg.get("zero_shot", {})
     zs_model = cfg_zs.get("model", "facebook/bart-large-mnli")
@@ -441,22 +441,21 @@ def _prepare_professor_data(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     train_df = train_df.copy()
     train_df["sentiment"] = labels
 
-    # courseeval: derive labels from numeric ratings for validation
-    val_rows: list[pd.DataFrame] = []
-    if "rating" in val_df.columns:
-        val_df = val_df.copy()
-        ratings = pd.to_numeric(val_df["rating"], errors="coerce")
-
-        def _map_courseeval_rating(r) -> str | None:
-            if pd.isna(r):
-                return None
-            if r < 0:
-                return "Negative"
-            if r == 0:
-                return "Neutral"
-            return "Positive"
-
-        val_df["sentiment"] = ratings.apply(_map_courseeval_rating)
+    # courseeval validation: use dimension-constrained zero-shot so val labels
+    # are consistent with training labels (not just broad Positive/Neutral/Negative)
+    if "sentiment" not in val_df.columns:
+        from .data_loaders import load_courseeval_labeled
+        try:
+            val_labeled = load_courseeval_labeled(cfg=cfg, zs_model=cfg_zs.get("model", "facebook/bart-large-mnli"))
+            val_df = val_df.copy()
+            val_df["sentiment"] = val_labeled.loc[val_df.index, "sentiment"].values
+        except Exception as exc:
+            logger.warning("[professor] Val labeling failed (%s) — falling back to rating buckets.", exc)
+            val_df = val_df.copy()
+            ratings = pd.to_numeric(val_df.get("rating", pd.Series(dtype=float)), errors="coerce")
+            val_df["sentiment"] = ratings.apply(
+                lambda r: None if pd.isna(r) else ("Negative" if r < 0 else ("Neutral" if r == 0 else "Positive"))
+            )
 
     return train_df, val_df
 

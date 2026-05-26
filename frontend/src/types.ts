@@ -4,4 +4,4 @@ export type { SummaryStats, ResultRow, AnalysisResult, JobStatus, MinorityResult
 
 export type Phase = "idle" | "uploading" | "running" | "done" | "error";
 
-export type TabId = "overview" | "results" | "minority" | "mismatch" | "review";
+export type TabId = "overview" | "summary" | "results" | "minority" | "mismatch" | "review";

@@ -163,6 +163,7 @@ zero_shot_candidates:
     - "course content is relevant and up to date"
     - "course content is rigorous and comprehensive"
     - "course content is outdated or misaligned with exams"
+    - "course content does not match what is tested on exams"
     - "course content assumes prior knowledge not listed"
     - "exam is fair and reflects what was taught"
     - "exam is unfair or tests untaught material"
@@ -170,9 +171,11 @@ zero_shot_candidates:
     - "accommodation or accessibility failure in exam"
     - "lab is hands-on and well organized"
     - "lab equipment is broken or instructions are unclear"
+    - "lab is poorly organized or sessions are badly scheduled"
     - "lab scheduling or location creates barriers"
     - "professor is responsive and supportive"
     - "professor is unavailable or dismissive"
+    - "quality of professor support or feedback is poor"
     - "professor gives unequal support to certain students"
     - "student from minority background describing a barrier"
     - "generic positive feedback about the course"
@@ -203,6 +206,7 @@ zero_shot_label_map:
     "course content is relevant and up to date": "Content_Positive_Relevance"
     "course content is rigorous and comprehensive": "Content_Positive_Depth"
     "course content is outdated or misaligned with exams": "Content_Negative_Outdated"
+    "course content does not match what is tested on exams": "Content_Negative_Misaligned"
     "course content assumes prior knowledge not listed": "Content_Negative_Accessibility"
     "exam is fair and reflects what was taught": "Exam_Positive_Fair"
     "exam is unfair or tests untaught material": "Exam_Negative_Unfair"
@@ -210,12 +214,37 @@ zero_shot_label_map:
     "accommodation or accessibility failure in exam": "Exam_Negative_Accessibility"
     "lab is hands-on and well organized": "Lab_Positive"
     "lab equipment is broken or instructions are unclear": "Lab_Negative_Equipment"
+    "lab is poorly organized or sessions are badly scheduled": "Lab_Negative_Organization"
     "lab scheduling or location creates barriers": "Lab_Negative_Accessibility"
     "professor is responsive and supportive": "Support_Positive"
     "professor is unavailable or dismissive": "Support_Negative_Availability"
+    "quality of professor support or feedback is poor": "Support_Negative_Quality"
     "professor gives unequal support to certain students": "Support_Negative_Equity"
     "student from minority background describing a barrier": "Minority_Student_Experience"
     "generic positive feedback about the course": "Majority_Positive"
+
+# ---------------------------------------------------------------------------
+# Aggregation — professor/dimension-level summary
+# ---------------------------------------------------------------------------
+
+aggregation:
+  # Minimum number of students who must share a label before it becomes a finding.
+  # Below this it could be one outlier, not a pattern.
+  min_students_threshold: 3
+  # Percentage of responses that must carry a label to flag it as a concern.
+  min_pct_threshold: 10.0
+  # Column names to try as the entity grouping key (professor ID, course ID…).
+  # Falls back to 'dimension' column when none is found.
+  entity_id_columns:
+    - "teacher_id"
+    - "professor_id"
+    - "instructor_id"
+    - "course_id"
+    - "student_id"
+    - "name"
+    - "prof_name"
+    - "teacher"
+    - "instructor"
 
 # RMP emotional_label → initial pseudo-label mapping
 rmp_label_map:
