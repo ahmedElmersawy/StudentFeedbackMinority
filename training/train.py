@@ -1,26 +1,27 @@
 """
-Feedback Atlas Training Script
-================================
-Trains a distilroberta-base sentiment classifier on any feedback CSV.
-Supports:
-  - studentdataset.csv  (rating-based label derivation)
-  - CATMEcomments_Training.csv  (headerless; zero-shot label generation)
-  - Any CSV with a label column, rating column, or pure text
+Feedback Atlas Training Script — Dual-Mode
+==========================================
+Trains distilroberta-base on student feedback.
 
-Usage examples:
-  # Original Purdue dataset (auto-detect .1 text cols + numeric ratings)
-  python -m training.train --csv studentdataset.csv
+Two modes:
+  student_to_student  → CATME peer/self feedback (11 labels)
+  student_to_professor → RMP + courseeval (24 labels)
 
-  # CATME peer-feedback (headerless, zero-shot labels, anonymize names)
-  python -m training.train --csv CATMEcomments_Training.csv \
-      --output-dir catme_feedback_classifier
+Usage:
+  # CATME Student→Student model
+  python -m training.train --mode student_to_student
 
-  # CSV with explicit label column
-  python -m training.train --csv mydata.csv --label-col sentiment
+  # Professor model (RMP training + courseeval validation)
+  python -m training.train --mode student_to_professor
 
-  # Explicit text + rating columns
-  python -m training.train --csv mydata.csv \
-      --text-cols "Q1 Comments" "Q2 Comments" --rating-col avg_score
+  # Legacy: any CSV (auto-detect labels from ratings or zero-shot)
+  python -m training.train --csv studentdataset.csv --output-dir final_feedback_classifier
+
+DO NOT CHANGE:
+  - distilroberta-base base model
+  - Weighted cross-entropy (BalancedTrainer)
+  - Early stopping on minority_f1_mean
+  - all-MiniLM-L6-v2 for embeddings (minority detection)
 """
 from __future__ import annotations
 
@@ -35,12 +36,12 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
-from torch import nn
-from torch.optim import AdamW
-from torch.utils.data import Dataset
 from sklearn.metrics import classification_report, f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
+from torch import nn
+from torch.optim import AdamW
+from torch.utils.data import Dataset
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
@@ -72,7 +73,33 @@ def load_config() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Column detection (mirrors backend/pipeline.py but standalone)
+# CATME subtype detection (Step 2 from spec)
+# ---------------------------------------------------------------------------
+
+_SELF_INDICATORS = [
+    "i feel", "i did", "i worked", "i contributed",
+    "i tried", "i have been", "i was able", "i am",
+    "my contribution", "my work", "i could have",
+    "i think i", "i believe i", "i slipped", "i fell",
+    "i should have", "i plan to", "i will improve",
+    "i let the team", "i wasnt", "i wasn't", "i have done",
+    "i did my", "i completed my",
+]
+
+
+def detect_catme_subtype(text: str) -> str:
+    """Returns 'self_assessment' or 'peer_feedback'."""
+    tl = text.lower().strip()
+    score = sum(1 for k in _SELF_INDICATORS if k in tl)
+    if score >= 2:
+        return "self_assessment"
+    if score == 1 and len(text.split()) < 30:
+        return "self_assessment"
+    return "peer_feedback"
+
+
+# ---------------------------------------------------------------------------
+# Legacy column detection helpers (kept for --csv mode)
 # ---------------------------------------------------------------------------
 
 _TEXT_HINTS = (
@@ -104,7 +131,8 @@ def auto_detect_text_columns(df: pd.DataFrame, max_cols: int = 12) -> list[str]:
     candidates.sort(key=lambda x: -x[0])
     out = [c for _, c in candidates[:max_cols]]
     if not out:
-        out = [c for c in df.columns if pd.api.types.is_string_dtype(df[c].dtype) or df[c].dtype == object][:max_cols]
+        out = [c for c in df.columns
+               if pd.api.types.is_string_dtype(df[c].dtype) or df[c].dtype == object][:max_cols]
     return out
 
 
@@ -116,10 +144,8 @@ def auto_detect_rating_column(df: pd.DataFrame, text_cols: list[str]) -> str | N
             vals = df[col].dropna()
             if len(vals) == 0:
                 continue
-            # Standard 1-10 scale
             if vals.min() >= 1 and vals.max() <= 10:
                 return col
-            # Ternary -1/0/1 scale
             if set(vals.unique()).issubset({-1, 0, 1, -1.0, 0.0, 1.0}):
                 return col
     return None
@@ -139,26 +165,21 @@ def auto_detect_label_column(df: pd.DataFrame, text_cols: list[str]) -> str | No
     return None
 
 
-# ---------------------------------------------------------------------------
-# Ingestion
-# ---------------------------------------------------------------------------
-
 def _looks_headerless(val: str) -> bool:
     v = str(val).strip()
     return len(v) > 30 and " " in v
 
 
 def load_csv(path: Path) -> pd.DataFrame:
-    """Load CSV; auto-handle headerless CATME-style files."""
     raw = pd.read_csv(path, header=None, nrows=2)
     if _looks_headerless(str(raw.iloc[0, 0])):
-        logger.info("[load] Headerless CSV detected → adding 'text' header.")
+        logger.info("[load] Headerless CSV → adding 'text' header.")
         return pd.read_csv(path, header=None, names=["text"])
     return pd.read_csv(path)
 
 
 # ---------------------------------------------------------------------------
-# Label derivation
+# Rating → sentiment
 # ---------------------------------------------------------------------------
 
 def rating_to_sentiment(rating: float, q33: float = 0.0, q66: float = 0.0, use_quantile: bool = False) -> str | None:
@@ -181,9 +202,8 @@ def derive_labels_from_ratings(df: pd.DataFrame, rating_col: str) -> pd.Series:
     ratings = pd.to_numeric(df[rating_col], errors="coerce")
     vals = ratings.dropna()
 
-    # Ternary -1/0/1 scale: map directly without threshold guessing.
     if len(vals) > 0 and set(vals.unique()).issubset({-1, 0, 1, -1.0, 0.0, 1.0}):
-        logger.info("[labels] Detected ternary (-1/0/1) rating scale → direct mapping.")
+        logger.info("[labels] Ternary (-1/0/1) scale → direct mapping.")
         def _ternary(r: float) -> str | None:
             if pd.isna(r):
                 return None
@@ -193,7 +213,7 @@ def derive_labels_from_ratings(df: pd.DataFrame, rating_col: str) -> pd.Series:
     sentiments = ratings.apply(rating_to_sentiment)
 
     if sentiments.nunique(dropna=True) <= 1:
-        logger.info("[labels] Single-class from thresholds → switching to quantile split.")
+        logger.info("[labels] Single-class → switching to quantile split.")
         q33 = float(ratings.quantile(0.33))
         q66 = float(ratings.quantile(0.66))
         sentiments = ratings.apply(rating_to_sentiment, q33=q33, q66=q66, use_quantile=True)
@@ -201,32 +221,32 @@ def derive_labels_from_ratings(df: pd.DataFrame, rating_col: str) -> pd.Series:
     return sentiments
 
 
+# ---------------------------------------------------------------------------
+# Zero-shot labeling
+# ---------------------------------------------------------------------------
+
 def zero_shot_label(
     texts: list[str],
-    dataset_type: str,
-    cache_path: Path,
+    candidate_labels: list[str],
+    label_map: dict[str, str] | None = None,
+    cache_path: Path | None = None,
     batch_size: int = 32,
     zs_model: str = "facebook/bart-large-mnli",
-    candidate_labels: list[str] | None = None,
 ) -> list[str]:
     """
-    Assign labels to *texts* via BART-MNLI zero-shot classification.
+    Assign labels via BART-MNLI zero-shot classification.
     Results are checkpointed to *cache_path* so long runs can resume.
+    If label_map is provided, maps candidate strings → final label names.
     """
     import torch
     from transformers import pipeline as hf_pipeline
 
-    # Load cache
+    cache_file = cache_path or (_PROJECT_ROOT / "zero_shot_labels_cache.json")
     cached: dict[str, str] = {}
-    if cache_path.exists():
-        with open(cache_path, encoding="utf-8") as f:
+    if cache_file.exists():
+        with open(cache_file, encoding="utf-8") as f:
             cached = json.load(f)
         logger.info("[zero-shot] Loaded %d cached labels.", len(cached))
-
-    if candidate_labels is None:
-        cfg_labels = load_config().get("labels", {})
-        candidate_labels = cfg_labels.get(dataset_type, cfg_labels.get("broad", ["Positive", "Neutral", "Negative"]))
-    logger.info("[zero-shot] Candidate labels: %s", candidate_labels)
 
     device = 0 if torch.cuda.is_available() else -1
     logger.info("[zero-shot] Loading %s (device=%s)…", zs_model, "GPU" if device == 0 else "CPU")
@@ -241,7 +261,7 @@ def zero_shot_label(
 
     total = len(to_label)
     for start in range(0, total, batch_size):
-        batch_idx = to_label[start : start + batch_size]
+        batch_idx = to_label[start: start + batch_size]
         batch_texts = [texts[i] for i in batch_idx]
         raw = zs(batch_texts, candidate_labels, multi_label=False)
         if isinstance(raw, dict):
@@ -249,16 +269,17 @@ def zero_shot_label(
         for j, res in enumerate(raw):
             gi = batch_idx[j]
             winner = res["labels"][0]
-            results[gi] = winner
-            cached[texts[gi]] = winner
+            final = label_map.get(winner, winner) if label_map else winner
+            results[gi] = final
+            cached[texts[gi]] = final
 
         done = start + batch_size
         if done % 1000 == 0 or done >= total:
-            with open(cache_path, "w", encoding="utf-8") as f:
+            with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(cached, f)
-            logger.info("[zero-shot] Progress: %d/%d (checkpoint saved).", min(done, total), total)
+            logger.info("[zero-shot] %d/%d (checkpoint saved).", min(done, total), total)
 
-    with open(cache_path, "w", encoding="utf-8") as f:
+    with open(cache_file, "w", encoding="utf-8") as f:
         json.dump(cached, f)
 
     return results
@@ -294,7 +315,7 @@ class FeedbackDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
-# Weighted loss trainer
+# Weighted loss trainer (DO NOT CHANGE — spec constraint)
 # ---------------------------------------------------------------------------
 
 class BalancedTrainer(Trainer):
@@ -313,140 +334,232 @@ class BalancedTrainer(Trainer):
 
 
 # ---------------------------------------------------------------------------
-# Main training function
+# Student→Student (CATME) training
 # ---------------------------------------------------------------------------
 
-def train(
-    csv_path: str | Path,
-    output_dir: str | Path,
-    text_cols: list[str] | None = None,
-    rating_col: str | None = None,
-    label_col: str | None = None,
-    anonymize: bool = True,
-    use_zero_shot_for_labels: bool = True,
-    zero_shot_cache: str | Path | None = None,
+def _prepare_catme_data(cfg: dict) -> pd.DataFrame:
+    """Load CATME, detect subtypes, assign zero-shot labels per subtype."""
+    from .data_loaders import load_catme
+
+    df = load_catme()
+
+    # Detect subtype
+    logger.info("[catme] Detecting self_assessment vs peer_feedback subtypes…")
+    df["subtype"] = df["text"].apply(detect_catme_subtype)
+    counts = df["subtype"].value_counts()
+    logger.info("[catme] Subtypes: %s", counts.to_dict())
+
+    # Anonymize if possible
+    try:
+        from backend.anonymizer import anonymize_series
+        placeholder = cfg.get("anonymization", {}).get("placeholder", "[STUDENT]")
+        spacy_model = cfg.get("anonymization", {}).get("spacy_model", "en_core_web_sm")
+        df["text"] = anonymize_series(df["text"], placeholder=placeholder, spacy_model=spacy_model)
+        logger.info("[catme] Anonymization applied.")
+    except Exception as exc:
+        logger.warning("[catme] Anonymization skipped: %s", exc)
+
+    cfg_zs = cfg.get("zero_shot", {})
+    zs_model = cfg_zs.get("model", "facebook/bart-large-mnli")
+    bs = cfg_zs.get("batch_size", 32)
+    zs_candidates = cfg.get("zero_shot_candidates", {})
+    zs_label_map = cfg.get("zero_shot_label_map", {})
+
+    # Zero-shot label each subtype separately
+    labels_out = [""] * len(df)
+
+    for subtype in ("peer_feedback", "self_assessment"):
+        mask = df["subtype"] == subtype
+        idxs = df.index[mask].tolist()
+        texts = df.loc[mask, "text"].tolist()
+        if not texts:
+            continue
+        candidates = zs_candidates.get(subtype, ["Positive", "Neutral", "Negative"])
+        lmap = zs_label_map.get(subtype, {})
+        cache_path = _PROJECT_ROOT / f"zero_shot_cache_{subtype}.json"
+        logger.info("[catme] Zero-shot labeling %d %s rows…", len(texts), subtype)
+        batch_labels = zero_shot_label(
+            texts,
+            candidate_labels=candidates,
+            label_map=lmap,
+            cache_path=cache_path,
+            batch_size=bs,
+            zs_model=zs_model,
+        )
+        for i, idx in enumerate(idxs):
+            labels_out[df.index.get_loc(idx)] = batch_labels[i]
+
+    df["sentiment"] = labels_out
+    return df
+
+
+def train_catme(output_dir: str | Path | None = None) -> Path:
+    """Train Student→Student classifier on CATME data."""
+    cfg = load_config()
+    out_dir = Path(output_dir or (_PROJECT_ROOT / cfg.get("model", {}).get("catme_output_dir", "catme_feedback_classifier")))
+    df = _prepare_catme_data(cfg)
+    return _run_training(df, out_dir, cfg, source_name="CATME")
+
+
+# ---------------------------------------------------------------------------
+# Student→Professor training
+# ---------------------------------------------------------------------------
+
+def _prepare_professor_data(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load RMP (training) + courseeval (validation).
+    RMP rows get pseudo-labels from emotional_label, then refined with zero-shot.
+    courseeval is returned as a held-out validation set only.
+    """
+    from .data_loaders import load_professor_combined
+
+    train_df, val_df = load_professor_combined()
+
+    cfg_zs = cfg.get("zero_shot", {})
+    zs_model = cfg_zs.get("model", "facebook/bart-large-mnli")
+    bs = cfg_zs.get("batch_size", 32)
+    candidates = cfg.get("zero_shot_candidates", {}).get("professor", [])
+    lmap = cfg.get("zero_shot_label_map", {}).get("professor", {})
+    rmp_lmap = cfg.get("rmp_label_map", {})
+
+    # RMP: use pseudo_label from emotional_label where available,
+    # run zero-shot for everything else (refinement pass)
+    logger.info("[professor] Zero-shot labeling %d RMP rows…", len(train_df))
+    cache_path = _PROJECT_ROOT / "zero_shot_cache_professor.json"
+
+    # Seed cache with emotional_label pseudo-labels to reduce API calls
+    seed_cache: dict[str, str] = {}
+    if "pseudo_label" in train_df.columns and "text" in train_df.columns:
+        for _, row in train_df.iterrows():
+            if pd.notna(row.get("pseudo_label")) and pd.notna(row.get("text")):
+                seed_cache[str(row["text"])] = str(row["pseudo_label"])
+
+    if cache_path.exists():
+        with open(cache_path, encoding="utf-8") as f:
+            existing = json.load(f)
+        seed_cache.update(existing)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(seed_cache, f)
+
+    texts = train_df["text"].fillna("").astype(str).tolist()
+    labels = zero_shot_label(
+        texts,
+        candidate_labels=candidates,
+        label_map=lmap,
+        cache_path=cache_path,
+        batch_size=bs,
+        zs_model=zs_model,
+    )
+    train_df = train_df.copy()
+    train_df["sentiment"] = labels
+
+    # courseeval: derive labels from numeric ratings for validation
+    val_rows: list[pd.DataFrame] = []
+    if "rating" in val_df.columns:
+        val_df = val_df.copy()
+        ratings = pd.to_numeric(val_df["rating"], errors="coerce")
+
+        def _map_courseeval_rating(r) -> str | None:
+            if pd.isna(r):
+                return None
+            if r < 0:
+                return "Negative"
+            if r == 0:
+                return "Neutral"
+            return "Positive"
+
+        val_df["sentiment"] = ratings.apply(_map_courseeval_rating)
+
+    return train_df, val_df
+
+
+def train_professor(output_dir: str | Path | None = None) -> Path:
+    """Train Student→Professor classifier on RMP, validate on courseeval."""
+    cfg = load_config()
+    out_dir = Path(output_dir or (_PROJECT_ROOT / cfg.get("model", {}).get("professor_output_dir", "professor_feedback_classifier")))
+
+    train_df, val_df = _prepare_professor_data(cfg)
+
+    # Train on RMP
+    saved = _run_training(train_df, out_dir, cfg, source_name="RMP+courseeval", val_df=val_df)
+
+    # Report courseeval validation accuracy
+    _validate_on_courseeval(saved, val_df)
+    return saved
+
+
+def _validate_on_courseeval(model_dir: Path, val_df: pd.DataFrame) -> None:
+    """Run inference on courseeval and log per-label precision/recall."""
+    try:
+        from backend.pipeline import run_inference
+        df = val_df[val_df["text"].notna() & (val_df["text"].str.len() > 5)].copy()
+        result = run_inference(df, model_dir=str(model_dir))
+        if "sentiment" in result.columns and "prediction" in result.columns:
+            mask = result["sentiment"].notna()
+            logger.info(
+                "\n[courseeval validation]\n%s",
+                classification_report(
+                    result.loc[mask, "sentiment"],
+                    result.loc[mask, "prediction"],
+                    zero_division=0,
+                ),
+            )
+    except Exception as exc:
+        logger.warning("[courseeval validation] Skipped: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Core training function (shared by both modes)
+# ---------------------------------------------------------------------------
+
+def _run_training(
+    df: pd.DataFrame,
+    output_dir: Path,
+    cfg: dict,
+    source_name: str = "dataset",
+    val_df: pd.DataFrame | None = None,
 ) -> Path:
     """
-    Full training pipeline.
-
-    Returns the path to the saved model directory.
+    Given a DataFrame with 'text' + 'sentiment' columns, train and save a model.
+    If val_df is provided it is used as the held-out eval set; otherwise a
+    random split of df is used.
     """
-    cfg = load_config()
     tc = cfg.get("training", {})
     mc = cfg.get("model", {})
-
-    csv_path = Path(csv_path)
-    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Load data ─────────────────────────────────────────────────────────
-    logger.info("=" * 70)
-    logger.info("LOADING DATA: %s", csv_path)
-    logger.info("=" * 70)
-    df_raw = load_csv(csv_path)
-    logger.info("Rows: %d, Columns: %s", len(df_raw), df_raw.columns.tolist())
-
-    # ── Detect columns ────────────────────────────────────────────────────
-    detected_text_cols = text_cols or auto_detect_text_columns(df_raw)
-    if not detected_text_cols:
-        raise ValueError("No text columns found. Pass --text-cols explicitly.")
-    detected_rating_col = rating_col or (None if label_col else auto_detect_rating_column(df_raw, detected_text_cols))
-    detected_label_col = label_col or auto_detect_label_column(df_raw, detected_text_cols)
-
-    logger.info("Text columns : %s", detected_text_cols)
-    logger.info("Rating column: %s", detected_rating_col)
-    logger.info("Label column : %s", detected_label_col)
-
-    # ── Combine text ──────────────────────────────────────────────────────
-    df = df_raw.copy()
-    df["text"] = (
-        df[detected_text_cols].fillna("").astype(str).agg(" ".join, axis=1)
-        .str.replace(r"\s+", " ", regex=True).str.strip()
-    )
-
-    # ── Anonymize ─────────────────────────────────────────────────────────
-    if anonymize:
-        try:
-            sys.path.insert(0, str(_PROJECT_ROOT))
-            from backend.anonymizer import anonymize_series
-            placeholder = cfg.get("anonymization", {}).get("placeholder", "[STUDENT]")
-            spacy_model = cfg.get("anonymization", {}).get("spacy_model", "en_core_web_sm")
-            df["text"] = anonymize_series(df["text"], placeholder=placeholder, spacy_model=spacy_model)
-            logger.info("Anonymization applied.")
-        except Exception as exc:
-            logger.warning("Anonymization skipped: %s", exc)
-
-    # ── Labels ────────────────────────────────────────────────────────────
-    logger.info("=" * 70)
-    logger.info("DERIVING LABELS")
-    logger.info("=" * 70)
-
-    if detected_label_col:
-        logger.info("Strategy: explicit label column '%s'", detected_label_col)
-        df["sentiment"] = df_raw[detected_label_col].astype(str).str.strip()
-    elif detected_rating_col:
-        logger.info("Strategy: derive from rating column '%s'", detected_rating_col)
-        df["sentiment"] = derive_labels_from_ratings(df, detected_rating_col)
-    elif use_zero_shot_for_labels:
-        dataset_type = detect_dataset_type(df["text"].dropna().tolist())
-        logger.info("Strategy: zero-shot classification (dataset_type=%s)", dataset_type)
-        cfg_zs = cfg.get("zero_shot", {})
-        cache = Path(zero_shot_cache or cfg_zs.get("cache_path", _PROJECT_ROOT / "zero_shot_labels_cache.json"))
-        labels = zero_shot_label(
-            df["text"].fillna("").astype(str).tolist(),
-            dataset_type=dataset_type,
-            cache_path=cache,
-            batch_size=cfg_zs.get("batch_size", 32),
-            zs_model=cfg_zs.get("model", "facebook/bart-large-mnli"),
-        )
-        df["sentiment"] = labels
-    else:
-        raise ValueError(
-            "No labels available. Pass --label-col, provide a rating column, "
-            "or enable zero-shot with --use-zero-shot."
-        )
-
-    # ── Clean ─────────────────────────────────────────────────────────────
-    df = df[df["text"].str.len() > 10].copy()
-    df = df.dropna(subset=["sentiment"]).copy()
+    # Clean
+    df = df[df["text"].notna() & (df["text"].str.len() > 10)].copy()
+    df = df[df["sentiment"].notna()].copy()
     df["text"] = df["text"].astype(str).str.strip()
     df["sentiment"] = df["sentiment"].astype(str).str.strip()
+    df = df[df["sentiment"] != "nan"].copy()
 
     label_counts = df["sentiment"].value_counts()
     logger.info("=" * 70)
-    logger.info("LABEL DISTRIBUTION (before undersampling)")
+    logger.info("LABEL DISTRIBUTION (%s — before undersampling)", source_name)
     logger.info("=" * 70)
     for lbl, cnt in label_counts.items():
-        logger.info("  %-28s %5d  (%5.1f%%)", lbl, cnt, 100.0 * cnt / len(df))
+        logger.info("  %-36s %5d  (%5.1f%%)", lbl, cnt, 100.0 * cnt / len(df))
 
-    # ── Undersample dominant class ─────────────────────────────────────────
+    # Undersample dominant class
     undersample_ratio = tc.get("undersample_ratio", None)
     if undersample_ratio is not None and len(label_counts) > 1:
         dominant = label_counts.idxmax()
-        second_largest = int(label_counts.drop(dominant).max())
-        cap = int(second_largest * undersample_ratio)
+        second = int(label_counts.drop(dominant).max())
+        cap = int(second * undersample_ratio)
         if label_counts[dominant] > cap:
-            keep_dominant = df[df["sentiment"] == dominant].sample(
-                cap, random_state=tc.get("random_state", 42)
-            )
-            df = pd.concat(
-                [keep_dominant, df[df["sentiment"] != dominant]]
-            ).sample(frac=1, random_state=tc.get("random_state", 42)).reset_index(drop=True)
+            keep = df[df["sentiment"] == dominant].sample(cap, random_state=tc.get("random_state", 42))
+            df = pd.concat([keep, df[df["sentiment"] != dominant]]).sample(
+                frac=1, random_state=tc.get("random_state", 42)
+            ).reset_index(drop=True)
             label_counts = df["sentiment"].value_counts()
-            logger.info(
-                "Undersampled '%s': capped at %d (%.1f× second-largest class).",
-                dominant, cap, undersample_ratio,
-            )
-            logger.info("=" * 70)
-            logger.info("LABEL DISTRIBUTION (after undersampling)")
-            logger.info("=" * 70)
-            for lbl, cnt in label_counts.items():
-                logger.info("  %-28s %5d  (%5.1f%%)", lbl, cnt, 100.0 * cnt / len(df))
+            logger.info("Undersampled '%s' → capped at %d.", dominant, cap)
 
     if len(label_counts) < 2:
-        raise ValueError(f"Need at least 2 classes; got {len(label_counts)}.")
+        raise ValueError(f"Need ≥2 classes; got {len(label_counts)}.")
 
-    # ── Encode labels ─────────────────────────────────────────────────────
+    # Encode labels
     unique_labels = sorted(df["sentiment"].unique())
     label2id = {l: i for i, l in enumerate(unique_labels)}
     id2label = {i: l for l, i in label2id.items()}
@@ -455,34 +568,54 @@ def train(
     X = df["text"].tolist()
     y = df["label_id"].tolist()
 
-    X_train, X_val, y_train, y_val = train_test_split(
+    # Split
+    X_train, X_val_split, y_train, y_val_split = train_test_split(
         X, y,
         test_size=tc.get("test_size", 0.2),
         stratify=y,
         random_state=tc.get("random_state", 42),
     )
-    logger.info("Train: %d  |  Val: %d", len(X_train), len(X_val))
 
-    # ── Tokenizer & datasets ──────────────────────────────────────────────
+    # Use external val_df if provided (e.g. courseeval), otherwise use split
+    if val_df is not None and "text" in val_df.columns and "sentiment" in val_df.columns:
+        vdf = val_df[val_df["text"].notna() & (val_df["sentiment"].notna())].copy()
+        vdf["text"] = vdf["text"].astype(str).str.strip()
+        vdf["sentiment"] = vdf["sentiment"].astype(str).str.strip()
+        # Only keep labels present in training set
+        vdf = vdf[vdf["sentiment"].isin(label2id)]
+        if len(vdf) > 0:
+            X_val_split = vdf["text"].tolist()
+            y_val_split = vdf["sentiment"].map(label2id).tolist()
+            logger.info("[val] Using external validation set: %d rows.", len(X_val_split))
+
+    logger.info("Train: %d  |  Val: %d", len(X_train), len(X_val_split))
+
+    # Tokenizer
     base_model = mc.get("base_model", "distilroberta-base")
     max_length = mc.get("max_length", 256)
-    logger.info("Loading tokenizer: %s", base_model)
     tokenizer = AutoTokenizer.from_pretrained(base_model)
 
     train_ds = FeedbackDataset(X_train, y_train, tokenizer, max_length=max_length)
-    val_ds = FeedbackDataset(X_val, y_val, tokenizer, max_length=max_length)
+    val_ds = FeedbackDataset(X_val_split, y_val_split, tokenizer, max_length=max_length)
 
-    # ── Class weights ─────────────────────────────────────────────────────
+    # Class weights — boost minority classes
     classes = np.unique(y_train)
     weights = compute_class_weight("balanced", classes=classes, y=y_train)
-    class_weights = torch.tensor(weights, dtype=torch.float)
-    logger.info("Class weights: %s", dict(zip([id2label[c] for c in classes], weights.round(3))))
 
-    minority_class_ids = [
-        i for i, cnt in Counter(y_train).items() if cnt < max(Counter(y_train).values())
+    # Extra multiplier for minority classes (spec: minority_class_weight_multiplier)
+    mult = tc.get("minority_class_weight_multiplier", 3.0)
+    max_cnt = max(Counter(y_train).values())
+    minority_ids = {i for i, cnt in Counter(y_train).items() if cnt < max_cnt}
+    weights = [
+        w * mult if i in minority_ids else w
+        for i, w in enumerate(weights)
     ]
+    class_weights = torch.tensor(weights, dtype=torch.float)
+    logger.info("Class weights (top 5): %s", dict(list(zip([id2label[c] for c in classes[:5]], weights[:5]))))
 
-    # ── Metrics ───────────────────────────────────────────────────────────
+    # Metrics — early stopping on minority_f1_mean (spec constraint)
+    minority_class_ids = sorted(minority_ids)
+
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
         preds = np.argmax(logits, axis=1)
@@ -498,13 +631,12 @@ def train(
         minority_f1 = float(np.mean(min_f1_scores)) if min_f1_scores else 0.0
         return {"f1_macro": macro, "f1_weighted": weighted, "minority_f1_mean": minority_f1}
 
-    # ── Model ─────────────────────────────────────────────────────────────
-    logger.info("Loading model: %s  (%d labels)", base_model, len(unique_labels))
+    # Model
     model = AutoModelForSequenceClassification.from_pretrained(
         base_model, num_labels=len(unique_labels), id2label=id2label, label2id=label2id
     )
 
-    # ── Training args ─────────────────────────────────────────────────────
+    # Training args
     training_args = TrainingArguments(
         output_dir=str(output_dir / "checkpoints"),
         num_train_epochs=tc.get("num_epochs", 15),
@@ -514,7 +646,7 @@ def train(
         save_strategy="epoch",
         logging_strategy="epoch",
         load_best_model_at_end=True,
-        metric_for_best_model="minority_f1_mean",
+        metric_for_best_model=tc.get("early_stopping_metric", "minority_f1_mean"),
         greater_is_better=True,
         learning_rate=tc.get("learning_rate", 3e-5),
         warmup_ratio=tc.get("warmup_ratio", 0.1),
@@ -525,17 +657,25 @@ def train(
         seed=tc.get("random_state", 42),
     )
 
-    # Differential learning rates
+    # Differential learning rates (spec: body_lr=1e-5, head_lr=1e-3)
     no_decay = ["bias", "LayerNorm.weight"]
+    body_lr = tc.get("body_lr", 1e-5)
+    head_lr = tc.get("head_lr", 1e-3)
     optimizer = AdamW([
-        {"params": [p for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and "classifier" not in n],
-         "lr": 1e-5, "weight_decay": 0.01},
-        {"params": [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay) and "classifier" not in n],
-         "lr": 1e-5, "weight_decay": 0.0},
-        {"params": [p for n, p in model.named_parameters() if "classifier" in n],
-         "lr": 1e-3, "weight_decay": 0.01},
+        {
+            "params": [p for n, p in model.named_parameters()
+                       if not any(nd in n for nd in no_decay) and "classifier" not in n],
+            "lr": body_lr, "weight_decay": tc.get("weight_decay", 0.01),
+        },
+        {
+            "params": [p for n, p in model.named_parameters()
+                       if any(nd in n for nd in no_decay) and "classifier" not in n],
+            "lr": body_lr, "weight_decay": 0.0,
+        },
+        {
+            "params": [p for n, p in model.named_parameters() if "classifier" in n],
+            "lr": head_lr, "weight_decay": tc.get("weight_decay", 0.01),
+        },
     ])
 
     trainer = BalancedTrainer(
@@ -544,30 +684,31 @@ def train(
         train_dataset=train_ds,
         eval_dataset=val_ds,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=tc.get("early_stopping_patience", 4))],
+        callbacks=[EarlyStoppingCallback(
+            early_stopping_patience=tc.get("early_stopping_patience", 3)
+        )],
         optimizers=(optimizer, None),
         class_weights=class_weights,
         num_labels=len(unique_labels),
     )
 
-    # ── Train ─────────────────────────────────────────────────────────────
     logger.info("=" * 70)
-    logger.info("TRAINING STARTED")
+    logger.info("TRAINING STARTED — %s", source_name)
     logger.info("=" * 70)
     trainer.train()
 
-    # ── Evaluate ─────────────────────────────────────────────────────────
+    # Evaluate
     results = trainer.evaluate()
     logger.info("Final validation results:")
     for k, v in results.items():
         if "runtime" not in k and "per_second" not in k:
-            logger.info("  %-32s %.4f", k, v)
+            logger.info("  %-36s %.4f", k, v)
 
     preds_raw = trainer.predict(val_ds).predictions
     pred_labels = np.argmax(preds_raw, axis=1)
-    logger.info("\n%s", classification_report(y_val, pred_labels, target_names=unique_labels, digits=4))
+    logger.info("\n%s", classification_report(y_val_split, pred_labels, target_names=unique_labels, digits=4))
 
-    # ── Save ─────────────────────────────────────────────────────────────
+    # Save
     logger.info("=" * 70)
     logger.info("SAVING MODEL → %s", output_dir)
     logger.info("=" * 70)
@@ -577,7 +718,7 @@ def train(
         tokenizer.save_pretrained(str(output_dir))
     except Exception as exc:
         fallback = output_dir.parent / (output_dir.name + "_fallback")
-        logger.warning("Primary save failed (%s). Retrying → %s", exc, fallback)
+        logger.warning("Primary save failed (%s) → %s", exc, fallback)
         trainer.save_model(str(fallback))
         tokenizer.save_pretrained(str(fallback))
         output_dir = fallback
@@ -587,9 +728,7 @@ def train(
 
     with open(output_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump({
-            "source_csv": str(csv_path),
-            "text_cols": detected_text_cols,
-            "label_strategy": "explicit" if detected_label_col else ("rating" if detected_rating_col else "zero_shot"),
+            "source": source_name,
             "num_labels": len(unique_labels),
             "labels": unique_labels,
             "eval_f1_macro": results.get("eval_f1_macro", 0),
@@ -601,45 +740,128 @@ def train(
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# Legacy CSV training (backward compat — for --csv flag)
+# ---------------------------------------------------------------------------
+
+def train(
+    csv_path: str | Path,
+    output_dir: str | Path,
+    text_cols: list[str] | None = None,
+    rating_col: str | None = None,
+    label_col: str | None = None,
+    anonymize: bool = True,
+    use_zero_shot_for_labels: bool = True,
+    zero_shot_cache: str | Path | None = None,
+) -> Path:
+    """Legacy single-CSV training (original Purdue dataset, any CSV)."""
+    cfg = load_config()
+    tc = cfg.get("training", {})
+    mc = cfg.get("model", {})
+
+    csv_path = Path(csv_path)
+    output_dir = Path(output_dir)
+
+    df_raw = load_csv(csv_path)
+    logger.info("Rows: %d, Columns: %s", len(df_raw), df_raw.columns.tolist())
+
+    detected_text_cols = text_cols or auto_detect_text_columns(df_raw)
+    detected_rating_col = rating_col or (None if label_col else auto_detect_rating_column(df_raw, detected_text_cols))
+    detected_label_col = label_col or auto_detect_label_column(df_raw, detected_text_cols)
+
+    df = df_raw.copy()
+    df["text"] = (
+        df[detected_text_cols].fillna("").astype(str).agg(" ".join, axis=1)
+        .str.replace(r"\s+", " ", regex=True).str.strip()
+    )
+
+    if anonymize:
+        try:
+            sys.path.insert(0, str(_PROJECT_ROOT))
+            from backend.anonymizer import anonymize_series
+            placeholder = cfg.get("anonymization", {}).get("placeholder", "[STUDENT]")
+            spacy_model = cfg.get("anonymization", {}).get("spacy_model", "en_core_web_sm")
+            df["text"] = anonymize_series(df["text"], placeholder=placeholder, spacy_model=spacy_model)
+        except Exception as exc:
+            logger.warning("Anonymization skipped: %s", exc)
+
+    if detected_label_col:
+        df["sentiment"] = df_raw[detected_label_col].astype(str).str.strip()
+    elif detected_rating_col:
+        df["sentiment"] = derive_labels_from_ratings(df, detected_rating_col)
+    elif use_zero_shot_for_labels:
+        dataset_type = detect_dataset_type(df["text"].dropna().tolist())
+        cfg_zs = cfg.get("zero_shot", {})
+        cache = Path(zero_shot_cache or cfg_zs.get("cache_path", _PROJECT_ROOT / "zero_shot_labels_cache.json"))
+        cfg_labels = cfg.get("labels", {})
+        candidates = cfg_labels.get(dataset_type, cfg_labels.get("broad", ["Positive", "Neutral", "Negative"]))
+        df["sentiment"] = zero_shot_label(
+            df["text"].fillna("").astype(str).tolist(),
+            candidate_labels=candidates,
+            cache_path=cache,
+            batch_size=cfg_zs.get("batch_size", 32),
+            zs_model=cfg_zs.get("model", "facebook/bart-large-mnli"),
+        )
+    else:
+        raise ValueError("No labels available.")
+
+    return _run_training(df, output_dir, cfg, source_name=csv_path.stem)
+
+
+# ---------------------------------------------------------------------------
+# CLI
 # ---------------------------------------------------------------------------
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Feedback Atlas — train sentiment classifier.")
-    parser.add_argument("--csv", dest="csv_path", default="studentdataset.csv")
-    parser.add_argument("--output-dir", default=None,
-                        help="Model output directory (default: auto-named from CSV).")
+    parser.add_argument(
+        "--mode",
+        choices=["student_to_student", "student_to_professor"],
+        default=None,
+        help="Dual-mode training: student_to_student (CATME) or student_to_professor (RMP+courseeval).",
+    )
+    parser.add_argument("--csv", dest="csv_path", default=None,
+                        help="Legacy: train on a single CSV file.")
+    parser.add_argument("--output-dir", default=None)
     parser.add_argument("--text-cols", nargs="*", default=None, metavar="COL")
     parser.add_argument("--rating-col", default=None, metavar="COL")
     parser.add_argument("--label-col", default=None, metavar="COL")
     parser.add_argument("--no-anonymize", action="store_true")
-    parser.add_argument("--no-zero-shot", action="store_true",
-                        help="Disable zero-shot label generation (fail if no labels/ratings).")
-    parser.add_argument("--zero-shot-cache", default=None,
-                        help="Path to zero-shot label cache JSON.")
+    parser.add_argument("--no-zero-shot", action="store_true")
+    parser.add_argument("--zero-shot-cache", default=None)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    cfg = load_config()
 
-    csv_stem = Path(args.csv_path).stem.lower()
-    if args.output_dir:
-        out_dir = args.output_dir
-    elif "catme" in csv_stem:
-        out_dir = str(_PROJECT_ROOT / "catme_feedback_classifier")
+    if args.mode == "student_to_student":
+        out = args.output_dir or str(_PROJECT_ROOT / cfg.get("model", {}).get("catme_output_dir", "catme_feedback_classifier"))
+        train_catme(output_dir=out)
+
+    elif args.mode == "student_to_professor":
+        out = args.output_dir or str(_PROJECT_ROOT / cfg.get("model", {}).get("professor_output_dir", "professor_feedback_classifier"))
+        train_professor(output_dir=out)
+
+    elif args.csv_path:
+        csv_stem = Path(args.csv_path).stem.lower()
+        if args.output_dir:
+            out_dir = args.output_dir
+        elif "catme" in csv_stem:
+            out_dir = str(_PROJECT_ROOT / cfg.get("model", {}).get("catme_output_dir", "catme_feedback_classifier"))
+        else:
+            out_dir = str(_PROJECT_ROOT / cfg.get("model", {}).get("output_dir", "final_feedback_classifier"))
+
+        train(
+            csv_path=args.csv_path,
+            output_dir=out_dir,
+            text_cols=args.text_cols,
+            rating_col=args.rating_col,
+            label_col=args.label_col,
+            anonymize=not args.no_anonymize,
+            use_zero_shot_for_labels=not args.no_zero_shot,
+            zero_shot_cache=args.zero_shot_cache,
+        )
     else:
-        out_dir = str(_PROJECT_ROOT / "final_feedback_classifier")
-
-    logger.info("Output directory: %s", out_dir)
-
-    train(
-        csv_path=args.csv_path,
-        output_dir=out_dir,
-        text_cols=args.text_cols,
-        rating_col=args.rating_col,
-        label_col=args.label_col,
-        anonymize=not args.no_anonymize,
-        use_zero_shot_for_labels=not args.no_zero_shot,
-        zero_shot_cache=args.zero_shot_cache,
-    )
+        parser = argparse.ArgumentParser()
+        parser.error("Provide --mode (student_to_student | student_to_professor) or --csv <path>.")

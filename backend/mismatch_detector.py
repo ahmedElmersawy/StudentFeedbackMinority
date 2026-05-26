@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import yaml
@@ -32,9 +33,9 @@ def _broad(label: str) -> str:
 def detect_mismatches(
     df: pd.DataFrame,
     prediction_col: str = "prediction",
-    rating_col: str | None = None,
-    high_rating_threshold: float | None = None,
-    low_rating_threshold: float | None = None,
+    rating_col: Optional[str] = None,
+    high_rating_threshold: Optional[float] = None,
+    low_rating_threshold: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Add ``mismatch_flag`` (bool) and ``mismatch_type`` (str) columns.

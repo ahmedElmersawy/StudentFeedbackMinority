@@ -1,0 +1,11 @@
+{
+  "source": "RMP+courseeval",
+  "num_labels": 3,
+  "labels": [
+    "Majority_Positive",
+    "Teaching_Negative_Clarity",
+    "Teaching_Positive_Engagement"
+  ],
+  "eval_f1_macro": 0.8055423579830542,
+  "eval_minority_f1_mean": 0.7820121084795836
+}

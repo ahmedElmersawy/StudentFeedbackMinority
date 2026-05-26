@@ -1,0 +1,12 @@
+{
+  "label2id": {
+    "Majority_Positive": 0,
+    "Teaching_Negative_Clarity": 1,
+    "Teaching_Positive_Engagement": 2
+  },
+  "id2label": {
+    "0": "Majority_Positive",
+    "1": "Teaching_Negative_Clarity",
+    "2": "Teaching_Positive_Engagement"
+  }
+}

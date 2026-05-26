@@ -1,8 +1,15 @@
-"""Minority-pattern detection and experiential-category classification."""
+"""
+Minority-pattern detection and experiential-category classification.
+
+DO NOT CHANGE:
+  - all-MiniLM-L6-v2 embeddings
+  - IsolationForest (global outliers) + DBSCAN (small clusters)
+"""
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -14,7 +21,7 @@ _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 
 # ---------------------------------------------------------------------------
-# Config helpers
+# Config
 # ---------------------------------------------------------------------------
 
 def _cfg() -> dict:
@@ -35,7 +42,7 @@ def _keyword_match(text: str, keyword_map: dict[str, list[str]]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Core detection
+# Core detection (DO NOT CHANGE algorithms)
 # ---------------------------------------------------------------------------
 
 def detect_minority_patterns(
@@ -48,7 +55,7 @@ def detect_minority_patterns(
     dbscan_min_samples: int = 5,
     min_cluster_size: int = 10,
     include_dbscan_noise: bool = False,
-    pred_df: pd.DataFrame | None = None,
+    pred_df: Optional[pd.DataFrame] = None,
     categorize: bool = True,
     run_zero_shot_categorization: bool = False,
 ) -> pd.DataFrame:
@@ -59,6 +66,11 @@ def detect_minority_patterns(
 
     After flagging, rows are categorised into experiential groups via keyword
     matching and optional zero-shot classification.
+
+    Keyword categories include:
+      - Minority experience categories (International_Student, First_Generation, etc.)
+      - Negative_Peer_Flag (unresponsive, did no work, ghosted)
+      - Suggestion_Flag (constructive improvement suggestions)
     """
     from sentence_transformers import SentenceTransformer
     from sklearn.cluster import DBSCAN
@@ -76,12 +88,12 @@ def detect_minority_patterns(
     embedder = SentenceTransformer(embedding_model)
     emb = embedder.encode(texts, batch_size=64, show_progress_bar=True, convert_to_numpy=True)
 
-    # ── IsolationForest ────────────────────────────────────────────────────
+    # IsolationForest (DO NOT CHANGE)
     iso = IsolationForest(contamination=contamination, n_estimators=n_estimators, random_state=42)
     outlier_labels = iso.fit_predict(emb)
     outlier_mask = outlier_labels == -1
 
-    # ── DBSCAN small clusters ──────────────────────────────────────────────
+    # DBSCAN small clusters (DO NOT CHANGE)
     clusterer = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples, metric="euclidean")
     cluster_labels = clusterer.fit_predict(emb)
 
@@ -133,28 +145,33 @@ def detect_minority_patterns(
 def categorize_minority_rows(
     texts: list[str],
     minority_mask: "np.ndarray",
-    keyword_map: dict[str, list[str]] | None = None,
-    zero_shot_model: str | None = None,
+    keyword_map: Optional[dict[str, list[str]]] = None,
+    zero_shot_model: Optional[str] = None,
     zero_shot_batch_size: int = 32,
 ) -> list[str]:
     """
     Assign each flagged row to one or more experiential categories.
 
-    Pass 1: keyword matching (fast).
-    Pass 2: zero-shot classification for rows that pass 1 missed (optional).
+    Pass 1: keyword matching (fast) — covers all categories including
+            Negative_Peer_Flag and Suggestion_Flag.
+    Pass 2: zero-shot classification for rows Pass 1 missed (optional).
 
-    Returns a list of ``"|"``-joined category strings (empty string for
-    rows not flagged as minority).
+    Returns a list of ``"|"``-joined category strings (empty for non-flagged rows).
     """
     cfg = _cfg()
     if keyword_map is None:
         keyword_map = cfg.get("minority_keywords", {})
+
     all_categories: list[str] = cfg.get("minority_categories", list(keyword_map.keys()))
-    zs_candidates = [c for c in all_categories if c != "Statistical_Outlier_Only"]
+    # Zero-shot only for actual minority experience categories (not Negative_Peer_Flag / Suggestion_Flag)
+    zs_candidates = [
+        c for c in all_categories
+        if c not in ("Statistical_Outlier_Only", "Negative_Peer_Flag", "Suggestion_Flag")
+    ]
 
     results: list[str] = [""] * len(texts)
-
     needs_zs: list[int] = []
+
     for i, text in enumerate(texts):
         if not minority_mask[i]:
             continue
@@ -164,7 +181,7 @@ def categorize_minority_rows(
         else:
             needs_zs.append(i)
 
-    # ── Optional zero-shot pass ────────────────────────────────────────────
+    # Optional zero-shot pass (for rows that had no keyword match)
     if needs_zs and zero_shot_model:
         try:
             import torch
@@ -180,7 +197,7 @@ def categorize_minority_rows(
 
             batch_texts = [texts[i] for i in needs_zs]
             for start in range(0, len(batch_texts), zero_shot_batch_size):
-                batch = batch_texts[start : start + zero_shot_batch_size]
+                batch = batch_texts[start: start + zero_shot_batch_size]
                 raw = zs(batch, zs_candidates, multi_label=True)
                 if isinstance(raw, dict):
                     raw = [raw]
@@ -205,7 +222,7 @@ def categorize_minority_rows(
 
 
 # ---------------------------------------------------------------------------
-# Category summary helper
+# Category summary helpers
 # ---------------------------------------------------------------------------
 
 def category_breakdown(minority_df: pd.DataFrame) -> dict[str, int]:
@@ -219,3 +236,11 @@ def category_breakdown(minority_df: pd.DataFrame) -> dict[str, int]:
             if cat:
                 counts[cat] = counts.get(cat, 0) + 1
     return dict(sorted(counts.items(), key=lambda x: -x[1]))
+
+
+def is_real_minority(row: pd.Series) -> bool:
+    """True if flagged AND has a meaningful category (not just Statistical_Outlier_Only)."""
+    if not row.get("is_minority_pattern", False):
+        return False
+    cats = str(row.get("minority_category", ""))
+    return bool(cats) and "Statistical_Outlier_Only" not in cats

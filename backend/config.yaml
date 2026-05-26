@@ -2,20 +2,30 @@ model:
   base_model: "distilroberta-base"
   max_length: 256
   batch_size: 32
-  output_dir: "../final_feedback_classifier"
-  catme_output_dir: "../catme_feedback_classifier"
+  # Student→Student model
+  catme_output_dir: "catme_feedback_classifier"
+  # Student→Professor model
+  professor_output_dir: "professor_feedback_classifier"
+  # Legacy default (still used by existing /predict endpoint)
+  output_dir: "final_feedback_classifier"
 
 training:
-  num_epochs: 15
+  num_epochs: 10
   batch_size: 16
-  learning_rate: 3.0e-5
+  body_lr: 1.0e-5       # encoder layers (slow — preserve pretrained knowledge)
+  head_lr: 1.0e-3       # classifier head (fast — learn the new task)
+  learning_rate: 3.0e-5  # fallback if differential LR not used
   warmup_ratio: 0.1
   weight_decay: 0.01
-  early_stopping_patience: 4
+  early_stopping_patience: 3
+  early_stopping_metric: "minority_f1_mean"
+  minority_class_weight_multiplier: 3.0
   test_size: 0.2
   random_state: 42
   fp16: true
-  undersample_ratio: 5  # cap dominant class at 5× the second-largest class
+  undersample_ratio: 3  # cap dominant class at 3× the second-largest class
+  eval_strategy: "steps"   # "steps" for large datasets, "epoch" for small
+  eval_steps: 10000         # evaluate every 10K steps (avoids 75-min epoch waits)
 
 embeddings:
   model: "all-MiniLM-L6-v2"
@@ -28,6 +38,22 @@ minority_detection:
   dbscan_min_samples: 5
   min_cluster_size: 10
   include_dbscan_noise: false
+  # Suppress IsolationForest outliers that have a purely positive prediction.
+  # A statistically-unusual "great course!" is not a useful minority signal.
+  suppress_positive_outliers: true
+  # Detect same-professor/student mixed signals (positive on X, negative on Y).
+  mixed_signal_detection: true
+  # Column names to try for grouping rows by the same person/entity.
+  entity_id_columns:
+    - "teacher_id"
+    - "professor_id"
+    - "instructor_id"
+    - "student_id"
+    - "id"
+    - "name"
+    - "prof_name"
+    - "teacher"
+    - "instructor"
 
 zero_shot:
   model: "facebook/bart-large-mnli"
@@ -46,7 +72,56 @@ anonymization:
   placeholder: "[STUDENT]"
   spacy_model: "en_core_web_sm"
 
+# ---------------------------------------------------------------------------
+# Label sets
+# ---------------------------------------------------------------------------
+
 labels:
+  # Student→Student: peer_feedback subtype (7 labels)
+  peer:
+    - "Negative_Contribution"
+    - "Negative_Communication"
+    - "Negative_Reliability"
+    - "Negative_Attitude"
+    - "Suggestion_To_Peer"
+    - "Minority_Peer_Experience"
+    - "Majority_Positive"
+
+  # Student→Student: self_assessment subtype (4 labels)
+  self:
+    - "Self_Struggle"
+    - "Self_Minority_Reveal"
+    - "Self_Suggestion"
+    - "Self_Positive"
+
+  # Student→Professor (17 labels across RMP + courseeval)
+  professor:
+    - "Teaching_Positive_Clarity"
+    - "Teaching_Positive_Engagement"
+    - "Teaching_Negative_Clarity"
+    - "Teaching_Negative_Pace"
+    - "Teaching_Negative_Inclusivity"
+    - "Content_Positive_Relevance"
+    - "Content_Positive_Depth"
+    - "Content_Negative_Outdated"
+    - "Content_Negative_Misaligned"
+    - "Content_Negative_Accessibility"
+    - "Exam_Positive_Fair"
+    - "Exam_Negative_Unfair"
+    - "Exam_Negative_Structure"
+    - "Exam_Negative_Accessibility"
+    - "Lab_Positive"
+    - "Lab_Negative_Equipment"
+    - "Lab_Negative_Organization"
+    - "Lab_Negative_Accessibility"
+    - "Support_Positive"
+    - "Support_Negative_Availability"
+    - "Support_Negative_Quality"
+    - "Support_Negative_Equity"
+    - "Minority_Student_Experience"
+    - "Majority_Positive"
+
+  # Legacy broad labels (kept for backward compat)
   course:
     - "Positive_Teaching"
     - "Positive_Content"
@@ -56,48 +131,186 @@ labels:
     - "Negative_Assessment"
     - "Negative_Support"
     - "Neutral"
-  peer:
-    - "Positive_Contribution"
-    - "Positive_Communication"
-    - "Positive_Leadership"
-    - "Positive_Reliability"
-    - "Negative_Contribution"
-    - "Negative_Communication"
-    - "Negative_Reliability"
-    - "Constructive"
+
   broad:
     - "Positive"
     - "Neutral"
     - "Negative"
 
+# Zero-shot candidate strings for each mode/subtype (maps to label_map in pipeline)
+zero_shot_candidates:
+  peer_feedback:
+    - "teammate did not contribute or do their work"
+    - "teammate did not communicate or went silent"
+    - "teammate missed meetings or deadlines"
+    - "teammate caused conflict or had bad attitude"
+    - "specific suggestion for teammate improvement"
+    - "teammate from underrepresented background facing barriers"
+    - "generic praise for teammate with no specific concerns"
+
+  self_assessment:
+    - "student acknowledges they underperformed or struggled"
+    - "student describes a personal hardship or barrier"
+    - "student recommends what they would do differently"
+    - "student describes their positive contribution"
+
+  professor:
+    - "professor explains clearly and teaches well"
+    - "professor is engaging and passionate"
+    - "professor is hard to follow or reads from slides"
+    - "course pace is too fast or disorganized"
+    - "teaching excludes students from certain backgrounds"
+    - "course content is relevant and up to date"
+    - "course content is rigorous and comprehensive"
+    - "course content is outdated or misaligned with exams"
+    - "course content assumes prior knowledge not listed"
+    - "exam is fair and reflects what was taught"
+    - "exam is unfair or tests untaught material"
+    - "exam has bad weighting or no partial credit"
+    - "accommodation or accessibility failure in exam"
+    - "lab is hands-on and well organized"
+    - "lab equipment is broken or instructions are unclear"
+    - "lab scheduling or location creates barriers"
+    - "professor is responsive and supportive"
+    - "professor is unavailable or dismissive"
+    - "professor gives unequal support to certain students"
+    - "student from minority background describing a barrier"
+    - "generic positive feedback about the course"
+
+# Zero-shot label_map: candidate string → label name
+zero_shot_label_map:
+  peer_feedback:
+    "teammate did not contribute or do their work": "Negative_Contribution"
+    "teammate did not communicate or went silent": "Negative_Communication"
+    "teammate missed meetings or deadlines": "Negative_Reliability"
+    "teammate caused conflict or had bad attitude": "Negative_Attitude"
+    "specific suggestion for teammate improvement": "Suggestion_To_Peer"
+    "teammate from underrepresented background facing barriers": "Minority_Peer_Experience"
+    "generic praise for teammate with no specific concerns": "Majority_Positive"
+
+  self_assessment:
+    "student acknowledges they underperformed or struggled": "Self_Struggle"
+    "student describes a personal hardship or barrier": "Self_Minority_Reveal"
+    "student recommends what they would do differently": "Self_Suggestion"
+    "student describes their positive contribution": "Self_Positive"
+
+  professor:
+    "professor explains clearly and teaches well": "Teaching_Positive_Clarity"
+    "professor is engaging and passionate": "Teaching_Positive_Engagement"
+    "professor is hard to follow or reads from slides": "Teaching_Negative_Clarity"
+    "course pace is too fast or disorganized": "Teaching_Negative_Pace"
+    "teaching excludes students from certain backgrounds": "Teaching_Negative_Inclusivity"
+    "course content is relevant and up to date": "Content_Positive_Relevance"
+    "course content is rigorous and comprehensive": "Content_Positive_Depth"
+    "course content is outdated or misaligned with exams": "Content_Negative_Outdated"
+    "course content assumes prior knowledge not listed": "Content_Negative_Accessibility"
+    "exam is fair and reflects what was taught": "Exam_Positive_Fair"
+    "exam is unfair or tests untaught material": "Exam_Negative_Unfair"
+    "exam has bad weighting or no partial credit": "Exam_Negative_Structure"
+    "accommodation or accessibility failure in exam": "Exam_Negative_Accessibility"
+    "lab is hands-on and well organized": "Lab_Positive"
+    "lab equipment is broken or instructions are unclear": "Lab_Negative_Equipment"
+    "lab scheduling or location creates barriers": "Lab_Negative_Accessibility"
+    "professor is responsive and supportive": "Support_Positive"
+    "professor is unavailable or dismissive": "Support_Negative_Availability"
+    "professor gives unequal support to certain students": "Support_Negative_Equity"
+    "student from minority background describing a barrier": "Minority_Student_Experience"
+    "generic positive feedback about the course": "Majority_Positive"
+
+# RMP emotional_label → initial pseudo-label mapping
+rmp_label_map:
+  awesome: "Teaching_Positive_Engagement"
+  good: "Teaching_Positive_Clarity"
+  average: "Majority_Positive"
+  poor: "Teaching_Negative_Clarity"
+  awful: "Teaching_Negative_Clarity"
+
+# ---------------------------------------------------------------------------
+# Priority scoring
+# ---------------------------------------------------------------------------
+
+priority:
+  high:
+    - "Negative_Contribution"
+    - "Negative_Communication"
+    - "Negative_Reliability"
+    - "Negative_Attitude"
+    - "Teaching_Negative_Inclusivity"
+    - "Exam_Negative_Accessibility"
+    - "Support_Negative_Equity"
+    - "Minority_Peer_Experience"
+    - "Minority_Student_Experience"
+    - "Self_Minority_Reveal"
+    - "Mixed_Signal_Pattern"
+  medium:
+    - "Suggestion_To_Peer"
+    - "Self_Struggle"
+    - "Teaching_Negative_Clarity"
+    - "Teaching_Negative_Pace"
+    - "Content_Negative_Misaligned"
+    - "Content_Negative_Accessibility"
+    - "Exam_Negative_Unfair"
+    - "Exam_Negative_Structure"
+    - "Support_Negative_Availability"
+    - "Support_Negative_Quality"
+    - "Lab_Negative_Equipment"
+    - "Lab_Negative_Organization"
+    - "Lab_Negative_Accessibility"
+  deprioritized:
+    - "Majority_Positive"
+    - "Self_Positive"
+    - "Teaching_Positive_Clarity"
+    - "Teaching_Positive_Engagement"
+    - "Content_Positive_Relevance"
+    - "Content_Positive_Depth"
+    - "Exam_Positive_Fair"
+    - "Lab_Positive"
+    - "Support_Positive"
+
+# ---------------------------------------------------------------------------
+# Minority keyword dictionary
+# All categories used for keyword-first detection (Step 3 in pipeline)
+# ---------------------------------------------------------------------------
+
 minority_categories:
   - "International_Student"
   - "First_Generation"
   - "Disability_Accessibility"
+  - "Mental_Health"
+  - "Caregiver"
   - "Financial_Hardship"
   - "Racial_Ethnic_Minority"
   - "Gender_Identity"
-  - "Mental_Health"
   - "International_Academic_Background"
-  - "Caregiver"
+  - "Negative_Peer_Flag"
+  - "Suggestion_Flag"
+  - "Mixed_Signal_Pattern"
   - "Statistical_Outlier_Only"
 
 minority_keywords:
   International_Student:
-    # self-reported (course feedback)
+    - "language barrier"
+    - "english is not my first language"
+    - "non-native"
+    - "international student"
+    - "speaks too fast"
+    - "hard to understand"
+    - "back home"
+    - "visa"
+    - "cultural reference"
+    - "idioms"
+    - "american culture"
+    - "from my country"
+    - "translation"
+    - "accent"
+    - "did not understand the joke"
+    - "native language"
     - "international"
     - "language barrier"
     - "cultural difference"
-    - "visa"
-    - "english as second language"
     - "esl"
-    - "native language"
-    - "back home"
-    - "my country"
     - "foreign student"
-    # peer-written (CATME)
     - "struggles with english"
-    - "hard to understand"
     - "accent made it difficult"
     - "different cultural background"
     - "not fluent"
@@ -105,105 +318,81 @@ minority_keywords:
     - "from another country"
     - "english is not their"
     - "language difficulties"
+
   First_Generation:
-    # self-reported (course feedback)
-    - "first generation"
-    - "first in family"
     - "first in my family"
+    - "first generation"
+    - "first gen"
+    - "nobody in my family"
+    - "did not know how university works"
+    - "unfamiliar with"
+    - "out of place"
+    - "do not belong"
+    - "feels far away"
+    - "assumed vocabulary"
+    - "assumed background"
+    - "grew up without"
+    - "never been to college"
+    - "first in family"
     - "parents didn't go to college"
-    - "unfamiliar with university"
     - "feeling out of place"
     - "imposter syndrome"
     - "first to attend"
     - "don't belong"
-    # peer-written (CATME) — rare but possible
     - "seemed unfamiliar with how college works"
     - "unsure how to navigate"
+
   Disability_Accessibility:
-    # self-reported (course feedback)
-    - "accommodation"
-    - "disability"
     - "adhd"
-    - "accessibility"
-    - "disability services"
     - "learning disability"
+    - "accommodation"
+    - "extended time"
+    - "disability office"
+    - "disability services"
+    - "motor disability"
+    - "alternative format"
+    - "process differently"
+    - "neurodivergent"
+    - "dyslexia"
+    - "cannot hear"
     - "physical disability"
+    - "chronic illness"
+    - "accommodation letter"
+    - "accessibility"
+    - "disability"
     - "hearing impaired"
     - "vision impaired"
     - "drc"
-    # peer-written (CATME)
     - "has a disability"
     - "needed accommodations"
     - "health issue"
     - "medical issue"
-    - "chronic illness"
     - "mobility issue"
-  Financial_Hardship:
-    # self-reported (course feedback)
-    - "financial"
-    - "textbook cost"
-    - "working multiple jobs"
-    - "financial aid"
-    - "food insecurity"
-    - "can't afford"
-    - "cost of textbook"
-    - "paying for school"
-    - "broke"
-    - "scholarship"
-    # peer-written (CATME)
-    - "works a lot"
-    - "has to work"
-    - "had a job"
-    - "multiple jobs"
-    - "couldn't afford"
-    - "financial stress"
-  Racial_Ethnic_Minority:
-    # self-reported (course feedback)
-    - "race"
-    - "ethnicity"
-    - "only one in"
-    - "representation"
-    - "discrimination"
-    - "minority student"
-    - "underrepresented"
-    - "racism"
-    - "microaggression"
-    # peer-written (CATME)
-    - "felt excluded"
-    - "left out of discussions"
-    - "treated differently"
-    - "bias"
-    - "not included"
-  Gender_Identity:
-    # self-reported (course feedback)
-    - "gender"
-    - "pronouns"
-    - "sexism"
-    - "sexual harassment"
-    - "inclusion"
-    - "woman in stem"
-    - "lgbtq"
-    - "non-binary"
-    - "transgender"
-    # peer-written (CATME)
-    - "she was ignored"
-    - "he was dismissive"
-    - "talked over"
-    - "voice wasn't heard"
-    - "not taken seriously"
+
   Mental_Health:
-    # self-reported (course feedback)
+    - "stressed"
+    - "overwhelmed"
     - "anxiety"
+    - "burned out"
+    - "burnout"
+    - "everything feels like a blur"
+    - "crappy hand"
+    - "not okay"
+    - "breaking point"
+    - "considered leaving"
+    - "question whether i belong"
+    - "falling apart"
+    - "cried"
+    - "stressful"
+    - "surviving not studying"
+    - "exhausted"
+    - "hard to explain"
     - "depression"
     - "mental health"
-    - "burnout"
-    - "overwhelmed"
     - "therapy"
     - "counseling"
     - "struggling mentally"
     - "sense of belonging"
-    - "stress"
-    # peer-written (CATME)
     - "seemed overwhelmed"
     - "appeared stressed"
     - "was going through a hard time"
@@ -214,8 +403,96 @@ minority_keywords:
     - "withdrawn"
     - "disengaged"
     - "checked out"
+
+  Caregiver:
+    - "family emergency"
+    - "family situation"
+    - "had to take care"
+    - "sick parent"
+    - "single parent"
+    - "caregiving"
+    - "away for family"
+    - "family responsibility"
+    - "home situation"
+    - "could not attend because of family"
+    - "child care"
+    - "my child"
+    - "family responsibilities"
+    - "caring for"
+    - "caregiver"
+    - "my children"
+    - "sick family member"
+    - "dependents"
+    - "family obligations"
+    - "personal family"
+    - "missed meetings for family"
+
+  Financial_Hardship:
+    - "work 30 hours"
+    - "work full time"
+    - "working outside school"
+    - "financial"
+    - "afford"
+    - "cannot buy"
+    - "textbook cost"
+    - "no laptop"
+    - "no reliable internet"
+    - "food insecurity"
+    - "housing instability"
+    - "paying bills"
+    - "financial aid"
+    - "working multiple jobs"
+    - "can't afford"
+    - "cost of textbook"
+    - "paying for school"
+    - "broke"
+    - "scholarship"
+    - "works a lot"
+    - "has to work"
+    - "had a job"
+    - "multiple jobs"
+    - "couldn't afford"
+    - "financial stress"
+
+  Racial_Ethnic_Minority:
+    - "only one who looks like me"
+    - "only person of my background"
+    - "my culture"
+    - "felt excluded"
+    - "nobody like me"
+    - "representation"
+    - "implicit bias"
+    - "stereotyped"
+    - "tokenized"
+    - "race"
+    - "ethnicity"
+    - "minority"
+    - "person of color"
+    - "discrimination"
+    - "minority student"
+    - "underrepresented"
+    - "racism"
+    - "microaggression"
+    - "left out of discussions"
+    - "treated differently"
+    - "bias"
+    - "not included"
+
+  Gender_Identity:
+    - "gender"
+    - "pronouns"
+    - "sexism"
+    - "sexual harassment"
+    - "woman in stem"
+    - "lgbtq"
+    - "non-binary"
+    - "transgender"
+    - "she was ignored"
+    - "talked over"
+    - "voice wasn't heard"
+    - "not taken seriously"
+
   International_Academic_Background:
-    # self-reported (course feedback)
     - "community college"
     - "different education system"
     - "preparation gap"
@@ -223,25 +500,43 @@ minority_keywords:
     - "high school didn't prepare"
     - "not prepared for"
     - "catching up"
-    # peer-written (CATME)
     - "different background"
     - "seemed less prepared"
     - "transfer"
     - "came from a different program"
-  Caregiver:
-    # self-reported (course feedback)
-    - "family responsibilities"
-    - "single parent"
-    - "caring for"
-    - "caregiver"
-    - "child care"
-    - "my children"
-    - "sick family member"
-    - "dependents"
-    # peer-written (CATME)
-    - "family situation"
-    - "family emergency"
-    - "had to take care of"
-    - "family obligations"
-    - "personal family"
-    - "missed meetings for family"
+
+  # Negative peer behavior flags (CATME peer_feedback only)
+  Negative_Peer_Flag:
+    - "did not participate"
+    - "never showed up"
+    - "did not respond"
+    - "went silent"
+    - "stopped contributing"
+    - "disappeared"
+    - "did not do"
+    - "did no work"
+    - "did nothing"
+    - "hard to reach"
+    - "missed every meeting"
+    - "did not communicate"
+    - "barely contributed"
+    - "never replied"
+    - "ghosted"
+
+  # Constructive suggestion flags (any mode)
+  Suggestion_Flag:
+    - "should"
+    - "could improve"
+    - "would recommend"
+    - "i suggest"
+    - "next time"
+    - "one thing i would change"
+    - "wish they had"
+    - "would be better if"
+    - "needs to work on"
+    - "if i could"
+    - "going forward"
+    - "hope to see"
+    - "please consider"
+    - "would be nice if"
+    - "i recommend"

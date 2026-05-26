@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import type { FeedbackMode } from "../api/client";
 import type { Phase } from "../types";
 
 interface Props {
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export interface UploadOptions {
+  feedbackMode: FeedbackMode | "auto";
   modelDir: string;
   anonymize: boolean;
   includeMinority: boolean;
@@ -25,6 +27,7 @@ export function UploadPanel({ phase, jobMessage, jobProgress, onUpload, onReset 
   const [dragOver, setDragOver] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [opts, setOpts] = useState<UploadOptions>({
+    feedbackMode: "auto",
     modelDir: "",
     anonymize: true,
     includeMinority: true,
@@ -103,15 +106,17 @@ export function UploadPanel({ phase, jobMessage, jobProgress, onUpload, onReset 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <label className="space-y-1">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-500">
-            Model directory (optional)
+            Feedback mode
           </span>
-          <input
-            type="text"
-            placeholder="final_feedback_classifier"
-            value={opts.modelDir}
-            onChange={(e) => setOpts((o) => ({ ...o, modelDir: e.target.value }))}
-            className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] px-3 py-1.5 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-          />
+          <select
+            value={opts.feedbackMode}
+            onChange={(e) => setOpts((o) => ({ ...o, feedbackMode: e.target.value as UploadOptions["feedbackMode"] }))}
+            className="w-full rounded-lg border border-white/[0.1] bg-[#0f1117] px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+          >
+            <option value="auto">Auto-detect</option>
+            <option value="student_to_student">Student → Student (CATME)</option>
+            <option value="student_to_professor">Student → Professor</option>
+          </select>
         </label>
         <label className="space-y-1">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-500">
@@ -125,6 +130,18 @@ export function UploadPanel({ phase, jobMessage, jobProgress, onUpload, onReset 
             value={opts.confidenceThreshold}
             onChange={(e) => setOpts((o) => ({ ...o, confidenceThreshold: parseFloat(e.target.value) }))}
             className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+          />
+        </label>
+        <label className="space-y-1 sm:col-span-2">
+          <span className="text-[11px] font-medium uppercase tracking-wider text-slate-500">
+            Model directory (optional)
+          </span>
+          <input
+            type="text"
+            placeholder="auto-selected based on mode"
+            value={opts.modelDir}
+            onChange={(e) => setOpts((o) => ({ ...o, modelDir: e.target.value }))}
+            className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] px-3 py-1.5 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-indigo-400"
           />
         </label>
       </div>

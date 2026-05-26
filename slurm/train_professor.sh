@@ -1,24 +1,28 @@
 #!/bin/bash
 # ============================================================
-# Train Feedback Atlas classifier on CATME peer-review data.
+# Train Feedback Atlas Student→Professor classifier.
+#
+# Training data : courseEval.csv  (RMP, ~150k sampled rows)
+# Validation    : studentdataset.csv  (Purdue courseeval — held-out)
 #
 # Two-stage:
-#   Stage 1 — zero-shot label generation (facebook/bart-large-mnli)
+#   Stage 1 — zero-shot label refinement via facebook/bart-large-mnli
+#             (seeds from RMP emotional_label first → fewer API calls)
 #             Labels are cached → interrupted jobs resume cleanly.
-#   Stage 2 — Fine-tune distilroberta-base with class-weighted loss.
+#   Stage 2 — Fine-tune distilroberta-base (24-class professor labels).
 #
-# Estimated wall time: ~6-8 h (144K rows; GPU-accelerated zero-shot)
-# Submit:  sbatch slurm/train_catme.sh
+# Estimated wall time: ~8-12 h (150k rows; GPU-accelerated zero-shot)
+# Submit:  sbatch slurm/train_professor.sh
 # ============================================================
 
-#SBATCH --job-name=feedback-catme
+#SBATCH --job-name=feedback-professor
 #SBATCH --account=davisjam
 #SBATCH --partition=a100-80gb
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=48G
-#SBATCH --time=12:00:00
-#SBATCH --output=/scratch/gilbreth/%u/slurm-feedback-catme-%j.out
+#SBATCH --mem=64G
+#SBATCH --time=16:00:00
+#SBATCH --output=/scratch/gilbreth/%u/slurm-feedback-professor-%j.out
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=aelmersa@purdue.edu
 
@@ -27,8 +31,8 @@ set -e
 # ── Paths ─────────────────────────────────────────────────
 SCRATCH="/scratch/gilbreth/$USER"
 PROJECT_DIR="$HOME/StudentFeedbackMinority"
-OUTPUT_DIR="${PROJECT_DIR}/catme_feedback_classifier"
-ZS_CACHE="${SCRATCH}/catme_zs_labels_cache.json"
+OUTPUT_DIR="${PROJECT_DIR}/professor_feedback_classifier"
+ZS_CACHE="${SCRATCH}/professor_zs_labels_cache.json"
 LOG_DIR="${SCRATCH}/feedback_logs"
 
 mkdir -p "${LOG_DIR}"
@@ -62,11 +66,13 @@ python -c "import torch; print(f'[info] CUDA available: {torch.cuda.is_available
 cd "${PROJECT_DIR}"
 
 python -m training.train \
-    --mode student_to_student \
+    --mode student_to_professor \
     --output-dir "${OUTPUT_DIR}" \
-    2>&1 | tee "${LOG_DIR}/catme_train_${SLURM_JOB_ID}.log"
+    2>&1 | tee "${LOG_DIR}/professor_train_${SLURM_JOB_ID}.log"
 
+# ── Report ────────────────────────────────────────────────
 echo "============================================================"
 echo " Training complete: $(date)"
-echo " Model saved to: ${OUTPUT_DIR}"
+echo " Model saved to  : ${OUTPUT_DIR}"
+echo " Courseeval validation accuracy printed above"
 echo "============================================================"

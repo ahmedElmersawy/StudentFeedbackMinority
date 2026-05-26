@@ -60,8 +60,15 @@ function LabelBars({ dist }: { dist: Record<string, number> }) {
 
   const colorFor = (label: string) => {
     const l = label.toLowerCase();
-    if (l.startsWith("positive")) return "#34d399";
-    if (l.startsWith("negative")) return "#fb7185";
+    if (
+      l.startsWith("positive_") || l.startsWith("majority_positive") ||
+      l.startsWith("self_positive") || l.includes("_positive_")
+    ) return "#34d399";
+    if (
+      l.startsWith("negative_") || l.startsWith("self_struggle") ||
+      l.startsWith("self_minority") || l.includes("_negative_") ||
+      l.startsWith("minority_")
+    ) return "#fb7185";
     return "#fbbf24";
   };
 
@@ -136,8 +143,25 @@ function OverviewTab({ result }: { result: AnalysisResult }) {
   const lowConf = confs.filter((c) => c < 0.7).length;
   const t = confs.length || 1;
 
+  const modeLabel =
+    summary.feedback_mode === "student_to_student" ? "Student → Student (CATME)"
+    : summary.feedback_mode === "student_to_professor" ? "Student → Professor"
+    : summary.feedback_mode;
+
   return (
     <div className="space-y-5">
+      {/* Mode badge */}
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-500">Mode</span>
+        <span className="inline-flex items-center rounded-full bg-indigo-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-300">
+          {modeLabel}
+        </span>
+        {summary.catme_subtype_distribution && Object.keys(summary.catme_subtype_distribution).length > 0 && (
+          <span className="text-[11px] text-slate-600">
+            ({Object.entries(summary.catme_subtype_distribution).map(([k, v]) => `${v} ${k.replace("_", " ")}`).join(" · ")})
+          </span>
+        )}
+      </div>
       {/* KPIs */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <KpiCard label="Total rows" value={summary.total.toLocaleString()} sub="feedback entries" accent="bg-indigo-500" />
@@ -255,6 +279,7 @@ export default function App() {
     setResult(null);
     try {
       const { job_id } = await uploadCsv(file, {
+        feedbackMode: opts.feedbackMode === "auto" ? undefined : opts.feedbackMode,
         modelDir: opts.modelDir || undefined,
         anonymize: opts.anonymize,
         includeMinority: opts.includeMinority,
@@ -393,7 +418,7 @@ export default function App() {
           {(!result || activeTab === "overview") && (
             <div className={cn(
               "mb-6 rounded-2xl border border-white/[0.08] bg-[#141928] p-5",
-              result && "hidden lg:block",
+              result ? "hidden lg:block" : undefined,
             )}>
               <h2 className="mb-4 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
                 {result ? "Replace dataset" : "Upload CSV"}

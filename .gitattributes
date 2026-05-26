@@ -2,3 +2,4 @@
 # tokenizer JSON and config stay in regular git
 *_feedback_classifier/**/*.safetensors filter=lfs diff=lfs merge=lfs -text
 *_feedback_classifier/**/*.bin filter=lfs diff=lfs merge=lfs -text
+catme_feedback_classifier/**/*.safetensors filter=lfs diff=lfs merge=lfs -text
