@@ -1,11 +1,32 @@
 {
   "source": "RMP+courseeval",
-  "num_labels": 3,
+  "num_labels": 24,
   "labels": [
+    "Content_Negative_Accessibility",
+    "Content_Negative_Misaligned",
+    "Content_Negative_Outdated",
+    "Content_Positive_Depth",
+    "Content_Positive_Relevance",
+    "Exam_Negative_Accessibility",
+    "Exam_Negative_Structure",
+    "Exam_Negative_Unfair",
+    "Exam_Positive_Fair",
+    "Lab_Negative_Accessibility",
+    "Lab_Negative_Equipment",
+    "Lab_Negative_Organization",
+    "Lab_Positive",
     "Majority_Positive",
+    "Minority_Student_Experience",
+    "Support_Negative_Availability",
+    "Support_Negative_Equity",
+    "Support_Negative_Quality",
+    "Support_Positive",
     "Teaching_Negative_Clarity",
+    "Teaching_Negative_Inclusivity",
+    "Teaching_Negative_Pace",
+    "Teaching_Positive_Clarity",
     "Teaching_Positive_Engagement"
   ],
-  "eval_f1_macro": 0.8055423579830542,
-  "eval_minority_f1_mean": 0.7820121084795836
+  "eval_f1_macro": 0.395,
+  "eval_minority_f1_mean": 0.395
 }
