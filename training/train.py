@@ -422,24 +422,12 @@ def _prepare_professor_data(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     lmap = cfg.get("zero_shot_label_map", {}).get("professor", {})
     rmp_lmap = cfg.get("rmp_label_map", {})
 
-    # RMP: use pseudo_label from emotional_label where available,
-    # run zero-shot for everything else (refinement pass)
-    logger.info("[professor] Zero-shot labeling %d RMP rows…", len(train_df))
+    # RMP: run zero-shot labeling over all rows using the full 24-label candidate set.
+    # Do NOT pre-seed from emotional_label — it only covers 5 rough labels and prevents
+    # BART-MNLI from assigning the other 19 professor categories.
+    # The cache checkpoint mechanism handles restarts cleanly.
+    logger.info("[professor] Zero-shot labeling %d RMP rows (24-class)…", len(train_df))
     cache_path = _PROJECT_ROOT / "zero_shot_cache_professor.json"
-
-    # Seed cache with emotional_label pseudo-labels to reduce API calls
-    seed_cache: dict[str, str] = {}
-    if "pseudo_label" in train_df.columns and "text" in train_df.columns:
-        for _, row in train_df.iterrows():
-            if pd.notna(row.get("pseudo_label")) and pd.notna(row.get("text")):
-                seed_cache[str(row["text"])] = str(row["pseudo_label"])
-
-    if cache_path.exists():
-        with open(cache_path, encoding="utf-8") as f:
-            existing = json.load(f)
-        seed_cache.update(existing)
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(seed_cache, f)
 
     texts = train_df["text"].fillna("").astype(str).tolist()
     labels = zero_shot_label(
