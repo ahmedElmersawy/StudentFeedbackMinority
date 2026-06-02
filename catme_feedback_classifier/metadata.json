@@ -14,6 +14,6 @@
     "Self_Suggestion",
     "Suggestion_To_Peer"
   ],
-  "eval_f1_macro": 0.6148561612381384,
-  "eval_minority_f1_mean": 0.6051691758650141
+  "eval_f1_macro": 0.5789044228936862,
+  "eval_minority_f1_mean": 0.4851367336859296
 }

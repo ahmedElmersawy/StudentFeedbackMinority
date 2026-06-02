@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional, Union
 
@@ -12,6 +13,11 @@ import pandas as pd
 import yaml
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Model cache — load each model once per process lifetime
+# ---------------------------------------------------------------------------
+_model_cache: dict[str, tuple] = {}  # str(path) -> (tokenizer, model, device, id2label)
 
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -28,10 +34,26 @@ def _cfg() -> dict:
 
 
 def _resolve_model(name: Optional[str] = None) -> Path:
-    """Locate a HuggingFace model directory on disk."""
-    env = os.environ.get("FEEDBACK_MODEL_DIR", "").strip()
-    raw = env or name or _cfg().get("model", {}).get("output_dir", "final_feedback_classifier")
+    """Locate a HuggingFace model directory on disk.
+
+    Prefers /tmp/fa_models/<name> (fast local disk) over NFS home directory.
+    On HPC clusters home directories are NFS-mounted — loading a 314 MB model
+    from NFS can take 10+ minutes vs <10 seconds from local /tmp SSD.
+    """
+    if name is not None:
+        raw = name
+    else:
+        env = os.environ.get("FEEDBACK_MODEL_DIR", "").strip()
+        raw = env or _cfg().get("model", {}).get("catme_output_dir", "catme_feedback_classifier")
+
     p = Path(raw).expanduser()
+
+    # Try local /tmp cache first (fast SSD, avoids NFS latency)
+    if not p.is_absolute():
+        local = Path("/tmp/fa_models") / p.name
+        if local.is_dir() and (local / "config.json").is_file():
+            return local.resolve()
+
     if p.is_absolute():
         return p.resolve()
     for root in (_PROJECT_ROOT, Path.cwd()):
@@ -530,9 +552,12 @@ def run_inference(
     model_dir: Union[str, Path, None] = None,
     batch_size: Optional[int] = None,
     confidence_threshold: Optional[float] = None,
+    progress_callback=None,
 ) -> pd.DataFrame:
     """Run the fine-tuned classifier on df['text']."""
+    import os
     import torch
+    torch.set_num_threads(os.cpu_count() or 1)
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     cfg = _cfg()
@@ -543,28 +568,92 @@ def run_inference(
     if not _model_is_valid(mdir):
         raise FileNotFoundError(f"Model not found at {mdir}")
 
-    tokenizer = AutoTokenizer.from_pretrained(mdir)
-    model = AutoModelForSequenceClassification.from_pretrained(mdir)
-    model.eval()
-    id2label = {int(k): v for k, v in model.config.id2label.items()}
+    cache_key = str(mdir)
+    if cache_key not in _model_cache:
+        logger.info("[inference] Loading model from %s (first time — caching for reuse)", mdir)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = model.to(device)
+        if progress_callback:
+            progress_callback(0, 0, 0)   # keep SSE alive during load
+
+        tokenizer = AutoTokenizer.from_pretrained(mdir)
+
+        if progress_callback:
+            progress_callback(0, 0, 0)   # tokenizer done — stay alive
+
+        model = AutoModelForSequenceClassification.from_pretrained(mdir)
+        model.eval()
+        id2label = {int(k): v for k, v in model.config.id2label.items()}
+
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                model = model.half().to("cuda")   # FP16 — 2× throughput on GPU
+                device = "cuda"
+                logger.info("[inference] GPU warmup (compiling CUDA kernels)…")
+                if progress_callback:
+                    progress_callback(0, 0, 0)   # keep SSE alive during warmup
+                _dummy = tokenizer(["warmup"], return_tensors="pt", padding=True)
+                _dummy = {k: v.to("cuda") for k, v in _dummy.items()}
+                with torch.inference_mode():
+                    model(**_dummy)
+                torch.cuda.synchronize()
+                logger.info("[inference] GPU warmup complete.")
+            except torch.OutOfMemoryError:
+                model = model.float().to("cpu")
+                device = "cpu"
+        else:
+            device = "cpu"
+
+        _model_cache[cache_key] = (tokenizer, model, device, id2label)
+        logger.info("[inference] Model cached on %s (FP16=%s).", device, device == "cuda")
+    else:
+        logger.info("[inference] Using cached model from %s.", mdir)
+        tokenizer, model, device, id2label = _model_cache[cache_key]
+
+    # Auto-scale batch size: GPU can handle much larger batches than CPU
+    if device == "cuda" and bs <= 64:
+        bs = 512   # A30 has 24 GB — 512-row batches are safe for distilroberta
+    elif device == "cuda" and bs < 256:
+        bs = 256
 
     texts = df["text"].fillna("").astype(str).tolist()
     predictions: list[str] = []
     confidences: list[float] = []
 
-    with torch.no_grad():
+    import time as _time
+    t_start = _time.perf_counter()
+    ctx = torch.inference_mode()   # slightly faster than no_grad, no autograd overhead
+
+    with ctx:
         for start in range(0, len(texts), bs):
             batch = texts[start: start + bs]
+            # Use dynamic padding (pad to longest in this batch, not global max_length)
             enc = tokenizer(batch, padding=True, truncation=True, max_length=256, return_tensors="pt")
-            enc = {k: v.to(device) for k, v in enc.items()}
-            probs = torch.softmax(model(**enc).logits, dim=1)
+            try:
+                enc = {k: v.to(device) for k, v in enc.items()}
+                logits = model(**enc).logits
+                if device == "cuda":
+                    # Keep on GPU until we need CPU arrays
+                    probs = torch.softmax(logits.float(), dim=1)
+                else:
+                    probs = torch.softmax(logits, dim=1)
+            except torch.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                device = "cpu"
+                model = model.float().to(device)
+                enc = {k: v.to(device) for k, v in enc.items()}
+                probs = torch.softmax(model(**enc).logits, dim=1)
+
             pred_ids = torch.argmax(probs, dim=1).cpu().tolist()
-            conf = torch.max(probs, dim=1).values.cpu().tolist()
+            conf     = torch.max(probs, dim=1).values.cpu().tolist()
             predictions.extend([id2label[p] for p in pred_ids])
             confidences.extend(conf)
+
+            done = min(start + bs, len(texts))
+            if progress_callback:
+                elapsed = _time.perf_counter() - t_start
+                speed   = done / elapsed if elapsed > 0 else 0
+                progress_callback(done, len(texts), speed)
 
     out = df.copy()
     out["prediction"] = predictions
@@ -649,6 +738,7 @@ def run_full_pipeline(
     include_mismatch: bool = True,
     run_zero_shot_categorization: bool = False,
     confidence_threshold: Optional[float] = None,
+    progress_callback=None,
 ) -> pd.DataFrame:
     """
     One-shot: ingest → mode detection → inference → CATME subtype → keyword minority
@@ -719,18 +809,28 @@ def run_full_pipeline(
                 logger.warning("[pipeline] Professor model not found at %s; trying default.", candidate)
 
     # Inference
-    df = run_inference(df, model_dir=model_dir, confidence_threshold=confidence_threshold)
+    df = run_inference(df, model_dir=model_dir, confidence_threshold=confidence_threshold,
+                       progress_callback=progress_callback)
 
     # Keyword-first minority detection (Step 3 — before embeddings)
+    # Vectorized: build a boolean mask per category using str.contains, then combine.
     keyword_map = cfg.get("minority_keywords", {})
-    kw_is_minority: list[bool] = []
-    kw_categories: list[list[str]] = []
-    for text in df["text"].tolist():
-        is_min, cats = keyword_minority_detection(text, keyword_map)
-        kw_is_minority.append(is_min)
-        kw_categories.append(cats)
-    df["keyword_minority"] = kw_is_minority
-    df["keyword_categories"] = ["|".join(c) for c in kw_categories]
+    lower_texts = df["text"].str.lower().fillna("")
+    cat_masks: dict[str, pd.Series] = {}
+    for cat, keywords in keyword_map.items():
+        pattern = "|".join(map(re.escape, keywords))
+        cat_masks[cat] = lower_texts.str.contains(pattern, regex=True, na=False)
+
+    kw_is_minority_series = pd.Series(False, index=df.index)
+    kw_categories_series: list[str] = []
+    for mask in cat_masks.values():
+        kw_is_minority_series |= mask
+    for i in df.index:
+        cats = [cat for cat, mask in cat_masks.items() if mask.at[i]]
+        kw_categories_series.append("|".join(cats))
+
+    df["keyword_minority"] = kw_is_minority_series
+    df["keyword_categories"] = kw_categories_series
 
     # Embedding-based minority detection (IsolationForest + DBSCAN)
     if include_minority:

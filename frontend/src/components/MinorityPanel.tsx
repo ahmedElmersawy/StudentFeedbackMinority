@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { AnalysisResult, ResultRow } from "../types";
 
 interface Props {
@@ -6,91 +6,135 @@ interface Props {
   onDownloadCsv?: () => void;
 }
 
-const CATEGORY_COLORS: Record<string, string> = {
-  Mental_Health: "#fb7185",
-  Financial_Hardship: "#f97316",
-  International_Student: "#a78bfa",
-  First_Generation: "#34d399",
-  Disability_Accessibility: "#38bdf8",
-  Racial_Ethnic_Minority: "#fbbf24",
-  Gender_Identity: "#e879f9",
-  International_Academic_Background: "#6ee7b7",
-  Caregiver: "#f472b6",
-  Statistical_Outlier_Only: "#64748b",
+const CAT_COLORS: Record<string, string> = {
+  Mental_Health: "#dc2626",              Financial_Hardship: "#c2410c",
+  International_Student: "#7c3aed",      First_Generation: "#059669",
+  Disability_Accessibility: "#0284c7",   Racial_Ethnic_Minority: "#d97706",
+  Gender_Identity: "#9333ea",            International_Academic_Background: "#0891b2",
+  Caregiver: "#db2777",                  Statistical_Outlier_Only: "#6b7280",
+  Negative_Peer_Flag: "#dc2626",         Suggestion_Flag: "#2563eb",
+  Mixed_Signal_Pattern: "#d97706",
 };
 
-function categoryColor(cat: string): string {
-  return CATEGORY_COLORS[cat] ?? "#818cf8";
-}
+function catColor(cat: string) { return CAT_COLORS[cat] ?? "#7c3aed"; }
 
-function downloadCsv(rows: ResultRow[], filename: string) {
-  const cols = ["text", "prediction", "confidence", "minority_category", "is_outlier", "is_minority_cluster", "cluster_id"];
-  const header = cols.join(",");
-  const lines = rows.map((r) =>
-    cols.map((c) => {
-      const v = String(r[c] ?? "").replace(/"/g, '""');
-      return `"${v}"`;
-    }).join(",")
+function ExpandableRow({ row, index }: { row: ResultRow; index: number }) {
+  const [open, setOpen] = useState(false);
+  const text    = ((row.text ?? row.feedback ?? "") as string);
+  const cats    = (row.minority_category as string | undefined) ?? "";
+  const isOut   = Boolean(row.is_outlier);
+  const isClust = Boolean(row.is_minority_cluster);
+  const conf    = typeof row.confidence === "number" ? row.confidence : null;
+
+  return (
+    <div
+      className="card"
+      style={{
+        border: "1px solid #fde68a",
+        background: "#fffbeb",
+        marginBottom: 8,
+        overflow: "hidden",
+      }}
+    >
+      <button
+        style={{ width: "100%", display: "flex", alignItems: "flex-start", gap: 12, padding: 14, background: "none", border: "none", cursor: "pointer", textAlign: "left" }}
+        onClick={() => setOpen(o => !o)}
+      >
+        {/* Badges */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, flexShrink: 0, maxWidth: 200 }}>
+          {isOut   && <span className="badge badge-red" style={{ fontSize: 10 }}>outlier</span>}
+          {isClust && <span className="badge badge-amber" style={{ fontSize: 10 }}>cluster</span>}
+          {cats.split("|").filter(Boolean).map(cat => (
+            <span key={cat} className="badge" style={{ fontSize: 10, background: `${catColor(cat)}18`, color: catColor(cat) }}>
+              {cat.replace(/_/g, " ")}
+            </span>
+          ))}
+        </div>
+        {/* Text */}
+        <p style={{ flex: 1, fontSize: 13, color: "var(--text-primary)", lineHeight: 1.6, margin: 0, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: open ? undefined : 2, WebkitBoxOrient: "vertical" }}>
+          {text}
+        </p>
+        {/* Right */}
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+          {conf != null && <span style={{ fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{(conf*100).toFixed(0)}%</span>}
+          <svg style={{ transform: open ? "rotate(180deg)" : "", transition: "transform 0.15s" }} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="var(--text-muted)" strokeWidth="1.5">
+            <path d="M2 4l4 4 4-4"/>
+          </svg>
+        </div>
+      </button>
+      {open && (
+        <div style={{ borderTop: "1px solid #fde68a", padding: "12px 14px", background: "white" }}>
+          <p style={{ fontSize: 13, color: "var(--text-primary)", lineHeight: 1.7, margin: "0 0 8px" }}>{text}</p>
+          {row.prediction && (
+            <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              Label: <strong>{row.prediction as string}</strong> · Row #{index + 1}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
-  const blob = new Blob([header + "\n" + lines.join("\n")], { type: "text/csv" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
 }
 
 export function MinorityPanel({ result, onDownloadCsv }: Props) {
-  const minorityRows = useMemo(
-    () => result.rows.filter((r) => Boolean(r.is_minority_pattern)),
-    [result.rows],
-  );
+  const minorityRows = useMemo(() => result.rows.filter(r => Boolean(r.is_minority_pattern)), [result.rows]);
+  const [search, setSearch]  = useState("");
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return minorityRows;
+    const q = search.toLowerCase();
+    return minorityRows.filter(r =>
+      ((r.text ?? r.feedback ?? "") as string).toLowerCase().includes(q) ||
+      ((r.minority_category ?? "") as string).toLowerCase().includes(q)
+    );
+  }, [minorityRows, search]);
 
   const catBreakdown = result.summary.minority_category_breakdown ?? {};
-  const catEntries = Object.entries(catBreakdown).sort((a, b) => b[1] - a[1]);
-  const total = result.summary.total;
+  const catEntries   = Object.entries(catBreakdown).sort((a, b) => b[1] - a[1]);
+  const maxCat       = Math.max(...catEntries.map(([, v]) => v), 1);
 
   return (
-    <div className="space-y-5">
-      {/* Summary */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* KPIs */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
         {[
-          { label: "Minority rows", value: result.summary.minority, accent: "bg-rose-500" },
-          { label: "% of dataset", value: `${result.summary.minority_pct}%`, accent: "bg-amber-400" },
-          { label: "Outliers (IsoForest)", value: result.rows.filter((r) => r.is_outlier).length, accent: "bg-indigo-400" },
-          { label: "Small clusters", value: result.rows.filter((r) => r.is_minority_cluster).length, accent: "bg-teal-400" },
-        ].map((kpi) => (
-          <div key={kpi.label} className="relative overflow-hidden rounded-xl border border-white/[0.08] bg-[#141928] px-4 py-3">
-            <div className={`absolute inset-x-0 top-0 h-0.5 ${kpi.accent}`} />
-            <p className="text-[10px] font-medium uppercase tracking-[0.1em] text-slate-500">{kpi.label}</p>
-            <p className="mt-1 text-xl font-bold tabular-nums text-slate-100">{kpi.value}</p>
+          { label: "Minority rows",       value: result.summary.minority,                             color: "var(--warning)" },
+          { label: "% of dataset",        value: `${result.summary.minority_pct}%`,                  color: "var(--warning)" },
+          { label: "Statistical outliers",value: result.rows.filter(r => r.is_outlier).length,       color: "var(--brand)" },
+          { label: "Small clusters",      value: result.rows.filter(r => r.is_minority_cluster).length, color: var_info() },
+        ].map(k => (
+          <div key={k.label} className="card" style={{ padding: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--text-muted)", marginBottom: 8 }}>{k.label}</div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: k.color, fontVariantNumeric: "tabular-nums" }}>
+              {typeof k.value === "number" ? k.value.toLocaleString() : k.value}
+            </div>
           </div>
         ))}
       </div>
 
-      {/* Category breakdown chart */}
+      {/* Category bars */}
       {catEntries.length > 0 && (
-        <div className="rounded-2xl border border-white/[0.08] bg-[#141928] p-5">
-          <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-              Experiential Category Breakdown
-            </h3>
-            <span className="text-xs text-slate-600">{minorityRows.length} flagged rows</span>
+        <div className="card">
+          <div className="card-header">
+            <div className="card-title">Experiential Category Breakdown</div>
+            <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{minorityRows.length.toLocaleString()} flagged rows</span>
           </div>
-          <div className="space-y-2.5">
+          <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {catEntries.map(([cat, count]) => {
-              const pct = Math.round((count / Math.max(1, minorityRows.length)) * 100);
-              const color = categoryColor(cat);
+              const color = catColor(cat);
+              const pct   = Math.round((count / Math.max(1, minorityRows.length)) * 100);
+              const w     = Math.round((count / maxCat) * 100);
               return (
                 <div key={cat}>
-                  <div className="mb-1 flex justify-between text-xs">
-                    <span className="text-slate-300">{cat.replace(/_/g, " ")}</span>
-                    <span className="font-semibold" style={{ color }}>{count} · {pct}%</span>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 5 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0 }} />
+                      <span style={{ color: "var(--text-primary)", fontWeight: 500 }}>{cat.replace(/_/g, " ")}</span>
+                    </div>
+                    <span style={{ color, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{count.toLocaleString()} · {pct}%</span>
                   </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-white/[0.06]">
-                    <div
-                      className="h-full rounded-full transition-all duration-700"
-                      style={{ width: `${pct}%`, background: color }}
-                    />
+                  <div className="progress-track" style={{ height: 8 }}>
+                    <div className="progress-bar" style={{ width: `${w}%`, background: color }} />
                   </div>
                 </div>
               );
@@ -99,70 +143,42 @@ export function MinorityPanel({ result, onDownloadCsv }: Props) {
         </div>
       )}
 
-      {/* Minority row list */}
-      <div className="rounded-2xl border border-white/[0.08] bg-[#141928] p-5">
-        <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-            Flagged Feedback
-          </h3>
-          <button
-            onClick={() => onDownloadCsv ? onDownloadCsv() : downloadCsv(minorityRows, "minority_patterns.csv")}
-            className="rounded-lg border border-white/[0.1] px-3 py-1 text-xs text-slate-400 hover:text-slate-200"
-          >
-            Download CSV
-          </button>
+      {/* Flagged rows */}
+      <div className="card">
+        <div className="card-header">
+          <div className="card-title">Flagged Feedback</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <div className="search-bar" style={{ width: 200 }}>
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="var(--text-muted)" strokeWidth="1.5"><circle cx="6" cy="6" r="4"/><path d="M10 10l4 4"/></svg>
+              <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)} />
+            </div>
+            {onDownloadCsv && (
+              <button className="btn btn-secondary btn-sm" onClick={onDownloadCsv}>
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 12V4M4 8l4 4 4-4M2 14h12"/></svg>
+                CSV
+              </button>
+            )}
+          </div>
         </div>
-
-        <ul className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
-          {minorityRows.slice(0, 100).map((row, i) => {
-            const text = ((row.text ?? row.feedback ?? "") as string);
-            const cats = (row.minority_category as string | undefined) ?? "";
-            const isOutlier = Boolean(row.is_outlier);
-            const isCluster = Boolean(row.is_minority_cluster);
-
-            return (
-              <li
-                key={i}
-                className="rounded-xl border border-amber-500/20 bg-amber-500/[0.05] p-3 text-sm"
-              >
-                <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-                  {isOutlier && (
-                    <span className="rounded-full bg-rose-500/20 px-2 py-0.5 text-[10px] font-semibold text-rose-300">
-                      outlier
-                    </span>
-                  )}
-                  {isCluster && (
-                    <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
-                      small cluster
-                    </span>
-                  )}
-                  {cats.split("|").filter(Boolean).map((cat) => (
-                    <span
-                      key={cat}
-                      className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
-                      style={{ background: `${categoryColor(cat)}20`, color: categoryColor(cat) }}
-                    >
-                      {cat.replace(/_/g, " ")}
-                    </span>
-                  ))}
-                  {row.prediction && (
-                    <span className="ml-auto text-[10px] text-slate-500">{row.prediction as string}</span>
-                  )}
-                </div>
-                <p className="line-clamp-3 text-slate-400 text-xs leading-relaxed">{text}</p>
-              </li>
-            );
-          })}
-          {minorityRows.length === 0 && (
-            <li className="py-6 text-center text-sm text-slate-600">No minority patterns detected.</li>
+        <div className="card-body" style={{ maxHeight: 540, overflowY: "auto" }}>
+          {filtered.length === 0 ? (
+            <div style={{ padding: "24px 0", textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
+              {search ? "No results for your search." : "No minority patterns detected."}
+            </div>
+          ) : (
+            <>
+              {filtered.slice(0, 100).map((row, i) => <ExpandableRow key={i} row={row} index={i} />)}
+              {filtered.length > 100 && (
+                <p style={{ textAlign: "center", fontSize: 12, color: "var(--text-muted)", padding: "8px 0" }}>
+                  Showing 100 of {filtered.length.toLocaleString()} — download CSV for full list.
+                </p>
+              )}
+            </>
           )}
-          {minorityRows.length > 100 && (
-            <li className="py-3 text-center text-xs text-slate-600">
-              Showing first 100 of {minorityRows.length}. Download CSV for full list.
-            </li>
-          )}
-        </ul>
+        </div>
       </div>
     </div>
   );
 }
+
+function var_info() { return "var(--info)"; }

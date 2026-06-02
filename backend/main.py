@@ -1,6 +1,7 @@
 """FastAPI backend for Feedback Atlas — Dual-Mode."""
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -9,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -194,10 +196,27 @@ def _run_pipeline_job(
     """Background task: run full pipeline and store result."""
     from .pipeline import run_full_pipeline, generate_output_files, check_success_criteria
 
+    import time as _time
     _jobs[job_id]["status"] = "running"
-    _jobs[job_id]["message"] = "Running pipeline…"
+    _jobs[job_id]["message"] = "Loading model…"
+    _jobs[job_id]["speed_rows_per_sec"] = 0.0
+    _jobs[job_id]["stage"] = "loading"
+
+    def _progress(done: int, total: int, speed: float = 0.0) -> None:
+        remaining = int((total - done) / speed) if speed > 0 and done < total else 0
+        _jobs[job_id]["rows_processed"]    = done
+        _jobs[job_id]["total_rows"]        = total
+        _jobs[job_id]["speed_rows_per_sec"]= round(speed, 1)
+        _jobs[job_id]["stage"]             = "classifying"
+        _jobs[job_id]["message"] = (
+            f"Classifying… {done:,}/{total:,} rows"
+            + (f" · {speed:,.0f} rows/sec" if speed > 0 else "")
+            + (f" · {remaining}s remaining" if remaining > 0 and remaining < 3600 else "")
+        )
+
     try:
-        df = run_full_pipeline(contents, feedback_mode=feedback_mode, **kwargs)
+        df = run_full_pipeline(contents, feedback_mode=feedback_mode,
+                               progress_callback=_progress, **kwargs)
         detected_mode = str(df["feedback_mode"].iloc[0]) if "feedback_mode" in df.columns else (feedback_mode or "unknown")
 
         success = check_success_criteria(df, detected_mode)
@@ -239,6 +258,58 @@ def job_status(job_id: str):
     )
 
 
+@app.get("/jobs/{job_id}/stream")
+async def job_stream(job_id: str):
+    """
+    Server-Sent Events stream for real-time pipeline progress.
+    Replaces polling — client receives updates every 400 ms.
+    """
+    async def _gen():
+        last_msg    = None
+        ping_ticks  = 0        # send `: ping` comment every 25 s to beat proxy timeouts
+
+        while True:
+            job = _jobs.get(job_id)
+            if not job:
+                yield f"event: error\ndata: {json.dumps({'message': 'Job not found'})}\n\n"
+                return
+
+            payload = {
+                "status":             job["status"],
+                "message":            job["message"],
+                "rows_processed":     job["rows_processed"],
+                "total_rows":         job["total_rows"],
+                "feedback_mode":      job.get("feedback_mode"),
+                "speed_rows_per_sec": job.get("speed_rows_per_sec", 0),
+                "stage":              job.get("stage", ""),
+            }
+            msg = json.dumps(payload)
+            if msg != last_msg:
+                yield f"data: {msg}\n\n"
+                last_msg = msg
+
+            if job["status"] in ("done", "error"):
+                return
+
+            # Keepalive ping every ~10 s — Cloudflare kills idle SSE after ~30 s,
+            # so we ping at 10 s to stay well under that threshold.
+            ping_ticks += 1
+            if ping_ticks % 25 == 0:   # 25 × 0.4 s = 10 s
+                yield ": ping\n\n"
+
+            await asyncio.sleep(0.4)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":    "no-cache",
+            "X-Accel-Buffering":"no",        # disable nginx buffering
+            "Connection":       "keep-alive",
+        },
+    )
+
+
 @app.get("/jobs/{job_id}/results")
 def job_results(job_id: str, format: str = "json"):
     """
@@ -263,7 +334,91 @@ def job_results(job_id: str, format: str = "json"):
             headers={"Content-Disposition": f"attachment; filename=results_{job_id}.csv"},
         )
 
-    return JSONResponse(_df_to_response(df, job))
+    # Cap JSON rows to avoid OOM / browser freeze on large datasets.
+    # Full data is always available via ?format=csv.
+    JSON_ROW_LIMIT = 10_000
+    df_json = df.head(JSON_ROW_LIMIT) if len(df) > JSON_ROW_LIMIT else df
+    return JSONResponse(_df_to_response(df_json, job, total_rows=len(df)))
+
+
+@app.get("/jobs/{job_id}/results/minority")
+def job_minority_results(job_id: str):
+    """Download only minority-flagged rows as CSV."""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["status"] != "done":
+        raise HTTPException(status_code=409, detail=f"Job not done (status: {job['status']}).")
+
+    df: pd.DataFrame = job["result_df"]
+    minority_col = "is_minority_pattern"
+    if minority_col not in df.columns:
+        raise HTTPException(status_code=404, detail="No minority detection data in this job.")
+
+    minority_df = df[df[minority_col].astype(bool)].copy()
+    buf = io.StringIO()
+    minority_df.to_csv(buf, index=False)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.read()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=minority_results_{job_id}.csv"},
+    )
+
+
+@app.get("/jobs/{job_id}/labels")
+def job_labels(job_id: str):
+    """Return per-label stats: count, pct, avg_confidence for every prediction label."""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["status"] != "done":
+        raise HTTPException(status_code=409, detail=f"Job not done (status: {job['status']}).")
+
+    df: pd.DataFrame = job["result_df"]
+    if "prediction" not in df.columns:
+        return {"labels": []}
+
+    total = len(df)
+    result = []
+    for label, group in df.groupby("prediction"):
+        result.append({
+            "label": str(label),
+            "count": int(len(group)),
+            "pct": round(100.0 * len(group) / max(1, total), 2),
+            "avg_confidence": round(float(group["confidence"].mean()) if "confidence" in group.columns else 0.0, 4),
+            "minority_count": int(group["is_minority_pattern"].astype(bool).sum()) if "is_minority_pattern" in group.columns else 0,
+        })
+    result.sort(key=lambda x: -x["count"])
+    return _to_python({"job_id": job_id, "total": total, "labels": result})
+
+
+@app.get("/jobs/{job_id}/results/label/{label}")
+def job_label_results(job_id: str, label: str):
+    """Download all rows for a specific prediction label as CSV."""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["status"] != "done":
+        raise HTTPException(status_code=409, detail=f"Job not done (status: {job['status']}).")
+
+    df: pd.DataFrame = job["result_df"]
+    if "prediction" not in df.columns:
+        raise HTTPException(status_code=404, detail="No prediction data in this job.")
+
+    label_df = df[df["prediction"] == label].copy()
+    if label_df.empty:
+        raise HTTPException(status_code=404, detail=f"Label '{label}' not found in results.")
+
+    safe_label = label.replace("/", "_").replace(" ", "_")
+    buf = io.StringIO()
+    label_df.to_csv(buf, index=False)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.read()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={safe_label}_{job_id}.csv"},
+    )
 
 
 @app.get("/jobs/{job_id}/download/{filename}")
@@ -434,42 +589,61 @@ def _broad_sentiment(label: str) -> str:
     return "Neutral"
 
 
-def _df_to_response(df: pd.DataFrame, job: dict | None = None) -> dict:
-    """Serialize a result DataFrame to a structured API response."""
-    bool_cols = df.select_dtypes(include="bool").columns.tolist()
+def _to_python(obj: Any) -> Any:
+    """Recursively convert numpy scalars to Python-native types for JSON."""
+    if isinstance(obj, dict):
+        return {k: _to_python(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_python(v) for v in obj]
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    return obj
+
+
+def _df_to_response(df: pd.DataFrame, job: dict | None = None, total_rows: int | None = None) -> dict:
+    """Serialize a result DataFrame to a structured API response.
+    total_rows overrides len(df) for summary stats when df is a truncated slice."""
+    bool_cols = df.select_dtypes(include=["bool"]).columns.tolist()
     for col in bool_cols:
         df[col] = df[col].astype(int)
 
-    total = len(df)
+    total = total_rows if total_rows is not None else len(df)
     minority_col = "is_minority_pattern"
     review_col = "needs_review"
     mismatch_col = "mismatch_flag"
     priority_col = "priority_score"
 
-    n_minority = int(df[minority_col].sum()) if minority_col in df.columns else 0
-    n_review = int(df[review_col].sum()) if review_col in df.columns else 0
-    n_mismatch = int(df[mismatch_col].sum()) if mismatch_col in df.columns else 0
-    avg_priority = float(df[priority_col].mean()) if priority_col in df.columns else 0.0
+    # Use the full DataFrame from the job for summary stats when a truncated slice is passed.
+    full_df = job["result_df"] if (job and total_rows is not None and "result_df" in job) else df
+
+    n_minority = int(full_df[minority_col].sum()) if minority_col in full_df.columns else 0
+    n_review = int(full_df[review_col].sum()) if review_col in full_df.columns else 0
+    n_mismatch = int(full_df[mismatch_col].sum()) if mismatch_col in full_df.columns else 0
+    avg_priority = float(full_df[priority_col].mean()) if priority_col in full_df.columns else 0.0
 
     label_dist: dict[str, int] = {}
-    if "prediction" in df.columns:
-        label_dist = df["prediction"].value_counts().to_dict()
+    if "prediction" in full_df.columns:
+        label_dist = full_df["prediction"].value_counts().to_dict()
 
     cat_breakdown: dict[str, int] = {}
-    if "minority_category" in df.columns:
+    if "minority_category" in full_df.columns:
         from .minority_detector import category_breakdown
-        flagged_df = df[df[minority_col].astype(bool)] if minority_col in df.columns else pd.DataFrame()
+        flagged_df = full_df[full_df[minority_col].astype(bool)] if minority_col in full_df.columns else pd.DataFrame()
         cat_breakdown = category_breakdown(flagged_df)
 
     # CATME subtype breakdown
     subtype_dist: dict[str, int] = {}
-    if "catme_subtype" in df.columns:
-        subtype_dist = df["catme_subtype"].value_counts().to_dict()
+    if "catme_subtype" in full_df.columns:
+        subtype_dist = full_df["catme_subtype"].value_counts().to_dict()
 
-    avg_conf = float(df["confidence"].mean()) if "confidence" in df.columns else 0.0
-    feedback_mode = str(df["feedback_mode"].iloc[0]) if "feedback_mode" in df.columns else "unknown"
+    avg_conf = float(full_df["confidence"].mean()) if "confidence" in full_df.columns else 0.0
+    feedback_mode = str(full_df["feedback_mode"].iloc[0]) if "feedback_mode" in full_df.columns else "unknown"
 
-    return {
+    return _to_python({
         "summary": {
             "total": total,
             "feedback_mode": feedback_mode,
@@ -486,6 +660,7 @@ def _df_to_response(df: pd.DataFrame, job: dict | None = None) -> dict:
             "catme_subtype_distribution": subtype_dist,
             "success_criteria": job.get("success_criteria") if job else None,
             "split_files": list(job.get("split_files", {}).keys()) if job else [],
+            "rows_truncated": total_rows is not None and len(df) < total,
         },
         "rows": df.fillna("").to_dict(orient="records"),
-    }
+    })

@@ -1,37 +1,30 @@
-# Feedback Atlas training + demo
+# Feedback Atlas
 
-Repository: [github.com/ahmedElmersawy/StudentFeedbackMinority](https://github.com/ahmedElmersawy/StudentFeedbackMinority).
+Student feedback classification and minority pattern detection.
 
-## 1) Install dependencies
+Repository: [github.com/ahmedElmersawy/StudentFeedbackMinority](https://github.com/ahmedElmersawy/StudentFeedbackMinority)
 
+## Models
+
+| Model | Directory | Use case |
+|-------|-----------|----------|
+| CATME | `catme_feedback_classifier/` | Student → Student (peer/self feedback) |
+| Professor | `professor_feedback_classifier/` | Student → Professor (course evaluations) |
+
+Train with:
 ```bash
-pip install -r requirements.txt
+sbatch slurm/train_catme.sh
+sbatch slurm/train_professor.sh
 ```
 
-## 2) Train on your CSV
-
-Default run on `studentdataset.csv`:
+## Running the app
 
 ```bash
-python studentfeedback_analysis.py
+# Backend
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+
+# Frontend (separate terminal)
+cd frontend && npm run dev
 ```
 
-If your dataset has a different schema, pass columns explicitly:
-
-```bash
-python studentfeedback_analysis.py --csv-path your_data.csv --text-cols col1 col2 --label-col target
-```
-
-Model artifacts are saved in `final_feedback_classifier/`.
-
-## 3) Launch demo website
-
-```bash
-streamlit run app.py
-```
-
-In the app:
-- Load model folder (`final_feedback_classifier`)
-- Upload any CSV
-- Choose one or more text columns
-- Run predictions and download results
+Open: http://localhost:5173 — or see [DEPLOY.md](DEPLOY.md) for Docker Compose.

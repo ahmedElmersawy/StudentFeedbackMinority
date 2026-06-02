@@ -27,13 +27,27 @@ def load_catme(filepath: str | Path | None = None) -> pd.DataFrame:
     File has no column header — first row is actual feedback text.
     Returns DataFrame with 'text', 'mode', 'source' columns.
     """
+    import re
     path = Path(filepath or (_PROJECT_ROOT / "CATMEcomments_Training.csv"))
     df = pd.read_csv(path, header=None, names=["text"])
     df["mode"] = "student_to_student"
     df["source"] = "CATME"
     df = df[df["text"].notna()]
-    df = df[df["text"].str.strip().str.len() > 5]
-    logger.info("[load_catme] Loaded %d rows from %s", len(df), path)
+    df["text"] = df["text"].astype(str).str.strip()
+
+    before = len(df)
+
+    # Drop rows that are too short to carry meaning
+    df = df[df["text"].str.len() >= 20]
+
+    # Drop rows that contain raw numeric IDs (corrupted export artifacts like "207043,2227414,...")
+    df = df[~df["text"].str.contains(r'\b\d{6,}\b', regex=True)]
+
+    # Drop rows that are purely punctuation / symbols / numbers with no real words
+    df = df[df["text"].str.contains(r'[a-zA-Z]{3,}', regex=True)]
+
+    after = len(df)
+    logger.info("[load_catme] Loaded %d rows from %s (dropped %d noise rows)", after, path, before - after)
     return df.reset_index(drop=True)
 
 

@@ -4,8 +4,8 @@ Feedback Atlas — Evaluation Script
 Evaluate a trained model against a CSV dataset.
 
 Usage:
-  python -m training.evaluate --model-dir final_feedback_classifier --csv studentdataset.csv
-  python -m training.evaluate --model-dir catme_feedback_classifier  --csv CATMEcomments_Training.csv
+  python -m training.evaluate --model-dir catme_feedback_classifier    --csv CATMEcomments_Training.csv
+  python -m training.evaluate --model-dir professor_feedback_classifier --csv studentdataset.csv
 """
 from __future__ import annotations
 
@@ -160,7 +160,7 @@ def evaluate(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate a trained Feedback Atlas model.")
-    parser.add_argument("--model-dir", default="final_feedback_classifier")
+    parser.add_argument("--model-dir", default="catme_feedback_classifier")
     parser.add_argument("--csv", dest="csv_path", required=True)
     parser.add_argument("--text-cols", nargs="*", default=None, metavar="COL")
     parser.add_argument("--label-col", default=None, metavar="COL")

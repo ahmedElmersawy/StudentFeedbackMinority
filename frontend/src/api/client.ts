@@ -32,6 +32,7 @@ export interface SummaryStats {
   catme_subtype_distribution: Record<string, number>;
   success_criteria: Record<string, boolean | number | string> | null;
   split_files: string[];
+  rows_truncated?: boolean;
 }
 
 export interface ResultRow {
@@ -126,6 +127,7 @@ export async function uploadCsv(
     runZeroShotCategorization?: boolean;
     confidenceThreshold?: number;
     generateSplitOutputs?: boolean;
+    onUploadProgress?: (pct: number) => void;   // transfer progress 0-100
   } = {}
 ): Promise<{ job_id: string }> {
   const form = new FormData();
@@ -135,25 +137,41 @@ export async function uploadCsv(
   form.append("anonymize", String(options.anonymize ?? true));
   form.append("include_minority", String(options.includeMinority ?? true));
   form.append("include_mismatch", String(options.includeMismatch ?? true));
-  form.append(
-    "run_zero_shot_categorization",
-    String(options.runZeroShotCategorization ?? false)
-  );
-  form.append(
-    "confidence_threshold",
-    String(options.confidenceThreshold ?? 0.65)
-  );
-  form.append(
-    "generate_split_outputs",
-    String(options.generateSplitOutputs ?? false)
-  );
+  form.append("run_zero_shot_categorization", String(options.runZeroShotCategorization ?? false));
+  form.append("confidence_threshold", String(options.confidenceThreshold ?? 0.65));
+  form.append("generate_split_outputs", String(options.generateSplitOutputs ?? false));
 
-  const res = await fetch(`${BASE}/upload`, { method: "POST", body: form });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail ?? "Upload failed");
-  }
-  return res.json();
+  // Use XHR instead of fetch so we get upload progress events
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE}/upload`);
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && options.onUploadProgress) {
+        options.onUploadProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch { reject(new Error("Invalid server response")); }
+      } else {
+        try {
+          const err = JSON.parse(xhr.responseText);
+          reject(new Error(err.detail ?? "Upload failed"));
+        } catch {
+          reject(new Error(`Upload failed (${xhr.status})`));
+        }
+      }
+    };
+
+    xhr.onerror = () => reject(new Error("Network error — check your connection and try again"));
+    xhr.ontimeout = () => reject(new Error("Upload timed out — try a smaller file or use the local URL"));
+    xhr.timeout = 600_000;   // 10 min max for very large files
+
+    xhr.send(form);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +208,40 @@ export function downloadResultsCsv(jobId: string, filename = "results.csv"): voi
   const a = document.createElement("a");
   a.href = `${BASE}/jobs/${jobId}/results?format=csv`;
   a.download = filename;
+  a.click();
+}
+
+export function downloadMinorityCsv(jobId: string, filename = "minority_results.csv"): void {
+  const a = document.createElement("a");
+  a.href = `${BASE}/jobs/${jobId}/results/minority`;
+  a.download = filename;
+  a.click();
+}
+
+export interface LabelStat {
+  label: string;
+  count: number;
+  pct: number;
+  avg_confidence: number;
+  minority_count: number;
+}
+
+export interface LabelsResult {
+  job_id: string;
+  total: number;
+  labels: LabelStat[];
+}
+
+export async function fetchLabels(jobId: string): Promise<LabelsResult> {
+  const res = await fetch(`${BASE}/jobs/${jobId}/labels`);
+  if (!res.ok) throw new Error("Labels not available");
+  return res.json();
+}
+
+export function downloadLabelCsv(jobId: string, label: string): void {
+  const a = document.createElement("a");
+  a.href = `${BASE}/jobs/${jobId}/results/label/${encodeURIComponent(label)}`;
+  a.download = `${label}.csv`;
   a.click();
 }
 
@@ -289,31 +341,63 @@ export async function detectMinority(
 }
 
 // ---------------------------------------------------------------------------
-// Helper: poll until done
+// Helper: SSE stream (replaces polling — real-time, lower overhead)
 // ---------------------------------------------------------------------------
 
 export async function waitForJob(
   jobId: string,
   onProgress?: (status: JobStatus) => void,
-  intervalMs = 1500
+  _intervalMs = 1500   // kept for backward compat, ignored (SSE used instead)
 ): Promise<AnalysisResult> {
   return new Promise((resolve, reject) => {
-    const timer = setInterval(async () => {
+    const es = new EventSource(`${BASE}/jobs/${jobId}/stream`);
+
+    es.onmessage = async (e) => {
       try {
-        const status = await pollJob(jobId);
+        const status = JSON.parse(e.data) as JobStatus;
         onProgress?.(status);
+
         if (status.status === "done") {
-          clearInterval(timer);
+          es.close();
           const results = await fetchResults(jobId);
           resolve(results);
         } else if (status.status === "error") {
-          clearInterval(timer);
+          es.close();
           reject(new Error(status.message));
         }
-      } catch (e) {
-        clearInterval(timer);
-        reject(e);
+      } catch (err) {
+        es.close();
+        reject(err);
       }
-    }, intervalMs);
+    };
+
+    es.onerror = () => {
+      es.close();
+      // SSE dropped (tunnel / proxy timeout) — silently fall back to polling loop.
+      // Never surface "SSE connection lost" to the user; just keep going.
+      const poll = setInterval(async () => {
+        try {
+          const status = await pollJob(jobId);
+          onProgress?.(status);
+          if (status.status === "done") {
+            clearInterval(poll);
+            fetchResults(jobId).then(resolve).catch(reject);
+          } else if (status.status === "error") {
+            clearInterval(poll);
+            reject(new Error(status.message));
+          }
+          // still "running" → keep polling
+        } catch (e) {
+          clearInterval(poll);
+          reject(e);
+        }
+      }, 2000);
+    };
   });
+}
+
+// Extended status type with speed/ETA
+export interface ExtendedJobStatus extends JobStatus {
+  speed_rows_per_sec?: number;
+  stage?: string;
 }

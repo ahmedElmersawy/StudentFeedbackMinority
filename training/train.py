@@ -14,8 +14,8 @@ Usage:
   # Professor model (RMP training + courseeval validation)
   python -m training.train --mode student_to_professor
 
-  # Legacy: any CSV (auto-detect labels from ratings or zero-shot)
-  python -m training.train --csv studentdataset.csv --output-dir final_feedback_classifier
+  # Custom CSV (auto-detect labels from ratings or zero-shot)
+  python -m training.train --csv mydata.csv --output-dir my_classifier
 
 DO NOT CHANGE:
   - distilroberta-base base model
@@ -390,6 +390,22 @@ def _prepare_catme_data(cfg: dict) -> pd.DataFrame:
             labels_out[df.index.get_loc(idx)] = batch_labels[i]
 
     df["sentiment"] = labels_out
+
+    # Sanity check: no single label should dominate by more than 30%.
+    # If it does, the zero-shot candidates are likely miscalibrated.
+    dist = df["sentiment"].value_counts(normalize=True)
+    for label, pct in dist.items():
+        if pct > 0.30:
+            logger.warning(
+                "[catme] LABEL IMBALANCE WARNING: '%s' = %.1f%% of training data — "
+                "check zero-shot candidates. Expected ≤30%%.",
+                label, pct * 100,
+            )
+
+    logger.info("[catme] Label distribution after zero-shot labeling:")
+    for label, pct in dist.items():
+        logger.info("  %-40s %.1f%%", label, pct * 100)
+
     return df
 
 
@@ -529,19 +545,25 @@ def _run_training(
     for lbl, cnt in label_counts.items():
         logger.info("  %-36s %5d  (%5.1f%%)", lbl, cnt, 100.0 * cnt / len(df))
 
-    # Undersample dominant class
+    # Undersample every class that exceeds (second_largest × undersample_ratio).
+    # Applying the cap to ALL over-represented labels prevents a mislabeled class
+    # (e.g. Minority_Peer_Experience inflated by a bad zero-shot cache) from
+    # skewing the training distribution even when it is not the single dominant class.
     undersample_ratio = tc.get("undersample_ratio", None)
     if undersample_ratio is not None and len(label_counts) > 1:
-        dominant = label_counts.idxmax()
-        second = int(label_counts.drop(dominant).max())
+        sorted_counts = label_counts.sort_values(ascending=False)
+        second = int(sorted_counts.iloc[1])
         cap = int(second * undersample_ratio)
-        if label_counts[dominant] > cap:
-            keep = df[df["sentiment"] == dominant].sample(cap, random_state=tc.get("random_state", 42))
-            df = pd.concat([keep, df[df["sentiment"] != dominant]]).sample(
-                frac=1, random_state=tc.get("random_state", 42)
-            ).reset_index(drop=True)
-            label_counts = df["sentiment"].value_counts()
-            logger.info("Undersampled '%s' → capped at %d.", dominant, cap)
+        rng = tc.get("random_state", 42)
+        parts = []
+        for lbl, cnt in label_counts.items():
+            subset = df[df["sentiment"] == lbl]
+            if cnt > cap:
+                subset = subset.sample(cap, random_state=rng)
+                logger.info("Undersampled '%s' %d → %d.", lbl, cnt, cap)
+            parts.append(subset)
+        df = pd.concat(parts).sample(frac=1, random_state=rng).reset_index(drop=True)
+        label_counts = df["sentiment"].value_counts()
 
     if len(label_counts) < 2:
         raise ValueError(f"Need ≥2 classes; got {len(label_counts)}.")
@@ -589,16 +611,22 @@ def _run_training(
     classes = np.unique(y_train)
     weights = compute_class_weight("balanced", classes=classes, y=y_train)
 
-    # Extra multiplier for minority classes (spec: minority_class_weight_multiplier)
+    # Extra multiplier for true minority classes.
+    # Labels in non_minority_labels (e.g. Majority_Positive, Self_Positive) are
+    # intentionally common — do NOT boost them or the model over-predicts them.
     mult = tc.get("minority_class_weight_multiplier", 3.0)
+    non_minority_label_names = set(tc.get("non_minority_labels", []))
     max_cnt = max(Counter(y_train).values())
-    minority_ids = {i for i, cnt in Counter(y_train).items() if cnt < max_cnt}
+    minority_ids = {
+        i for i, cnt in Counter(y_train).items()
+        if cnt < max_cnt and id2label[i] not in non_minority_label_names
+    }
     weights = [
         w * mult if i in minority_ids else w
         for i, w in enumerate(weights)
     ]
     class_weights = torch.tensor(weights, dtype=torch.float)
-    logger.info("Class weights (top 5): %s", dict(list(zip([id2label[c] for c in classes[:5]], weights[:5]))))
+    logger.info("Class weights: %s", {id2label[c]: round(weights[j], 3) for j, c in enumerate(classes)})
 
     # Metrics — early stopping on minority_f1_mean (spec constraint)
     minority_class_ids = sorted(minority_ids)
@@ -837,7 +865,7 @@ if __name__ == "__main__":
         elif "catme" in csv_stem:
             out_dir = str(_PROJECT_ROOT / cfg.get("model", {}).get("catme_output_dir", "catme_feedback_classifier"))
         else:
-            out_dir = str(_PROJECT_ROOT / cfg.get("model", {}).get("output_dir", "final_feedback_classifier"))
+            out_dir = str(_PROJECT_ROOT / "custom_classifier")
 
         train(
             csv_path=args.csv_path,

@@ -1,219 +1,201 @@
-# Deploy so anyone can open the app
+# Feedback Atlas — Deployment Guide
 
-You have **three** entry points in this repo:
+## Quick start (Docker, any Linux server with NVIDIA GPU)
 
-| App | Command | Best for |
-|-----|-----------|----------|
-| **Reflex** (newer UI) | `reflex run` | Custom layout, charts, public site |
-| **Streamlit** | `py -3.12 -m streamlit run app.py` | Fastest deploy on Streamlit Community Cloud |
-| **React SPA** | `cd frontend && npm run dev` | Class demo UI (mock detection); host `npm run build` on Netlify / static host |
+```bash
+git clone https://github.com/ahmedElmersawy/StudentFeedbackMinority
+cd StudentFeedbackMinority
 
-See `frontend/README.md` for the TypeScript app.
+# Models must exist (train first or copy from scratch)
+# ls catme_feedback_classifier/model.safetensors
+# ls professor_feedback_classifier/model.safetensors
+
+docker compose up --build -d
+```
+
+- **App:** http://localhost (nginx → React SPA)
+- **API:** http://localhost:8000 (FastAPI)
+- **Docs:** http://localhost:8000/docs
 
 ---
 
-## Reflex (recommended UI)
+## Option A — Fly.io (recommended, global edge, free tier available)
 
-### Why it “only worked on localhost”
-
-Browsers must reach **two** services: the **frontend** (HTML/JS) and the **backend** (WebSocket + uploads). For a public URL you must set **`API_URL`** to the **public backend address** (usually port **8000**), then rebuild or recompile so the frontend embeds that URL.
-
-Example:
-
+### 1. Install flyctl
 ```bash
-export API_URL=https://feedback-api.yourdomain.com:8000
-reflex run --env prod --backend-host 0.0.0.0
+curl -L https://fly.io/install.sh | sh
+fly auth login
 ```
 
-Or bake it at **image build** time:
-
+### 2. Launch the backend app
 ```bash
-docker build --build-arg API_URL=https://feedback-api.yourdomain.com:8000 -t feedback-web .
+fly launch --name feedback-atlas-api --region ord --no-deploy
+# Edit fly.toml if needed (see file in repo root)
+
+# Create a persistent volume for model weights (one-time)
+fly volumes create model_weights --region ord --size 20
+
+# Upload model weights (after training on SLURM)
+fly ssh sftp shell
+# then: put catme_feedback_classifier/model.safetensors /app/models/catme/model.safetensors
+
+fly deploy
 ```
 
-### Model path on a server
+Your API is live at: **https://feedback-atlas-api.fly.dev**
 
-The UI field `final_feedback_classifier` is resolved against the **current working directory** and the repo root. On a server, set an absolute path:
-
+### 3. Deploy the frontend to Vercel
 ```bash
-export FEEDBACK_MODEL_DIR=/data/models/final_feedback_classifier
+npm install -g vercel
+cd frontend
+VITE_API_URL=https://feedback-atlas-api.fly.dev npm run build
+vercel --prod
 ```
 
-Or mount your model folder into the container and point `FEEDBACK_MODEL_DIR` there.
-
-### Docker (VPS, Fly.io, EC2, etc.)
-
-```bash
-docker build -t feedback-web .
-docker run -d -p 3000:3000 -p 8000:8000 \
-  -e API_URL=http://YOUR_PUBLIC_IP:8000 \
-  -e FEEDBACK_MODEL_DIR=/models/final_feedback_classifier \
-  -v /path/on/host/models:/models:ro \
-  --name feedback feedback-web
-```
-
-Put **Nginx** or **Caddy** in front with TLS. Enable **WebSocket** proxying to port 8000 (required for Reflex state).
-
-### Free / simple hosts
-
-- **Streamlit Cloud** does **not** run Reflex; use the Streamlit section below for one-click hosting of `app.py`.
-- **Reflex Cloud**: see [reflex.dev](https://reflex.dev) hosting docs (`reflex deploy`).
-- **Railway / Render**: use this `Dockerfile`, set `API_URL` to your service’s public backend URL, expose ports **3000** and **8000** (or terminate TLS at the proxy).
+Vercel gives you: **https://feedback-atlas-xyz.vercel.app**
 
 ---
 
-## Streamlit (original `app.py`)
+## Option B — Railway (simplest, one-click deploy)
 
-### Streamlit Community Cloud (free tier)
+1. Fork this repo on GitHub
+2. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub
+3. Select your fork
+4. Set environment variables:
+   ```
+   TOKENIZERS_PARALLELISM=false
+   ```
+5. Add a **Volume** → mount at `/app/models`
+6. Upload model weights via Railway's file browser or SSH
 
-1. Push the repo to GitHub.
-2. On [share.streamlit.io](https://share.streamlit.io), create an app with main file `app.py`.
-3. Set Python **3.12** and `requirements.txt`.
-
-#### “That folder path does not exist” / model missing on Cloud
-
-The default sidebar path `final_feedback_classifier` is the folder **next to** `app.py` after training. That directory is **gitignored** in this repo (large weights), so **Streamlit Cloud clones a repo that does not contain the model** unless you add it.
-
-**Ways to fix it:**
-
-| Approach | What to do |
-|----------|------------|
-| **A. Ship the model in Git** | Remove `final_feedback_classifier/` from `.gitignore` (or only ignore checkpoints), commit the folder, push. Use **[Git LFS](https://git-lfs.github.com/)** for `*.safetensors` / large shards so the repo stays usable. |
-| **B. Env var on a custom host** | If you run Streamlit on a VM/Docker with a volume mount, set `FEEDBACK_MODEL_DIR` to the **absolute** path of the classifier folder. The app auto-loads from this variable when it is set. |
-| **C. Run locally** | Train or copy `final_feedback_classifier/` beside `app.py`, then `streamlit run app.py`. |
-
-Path resolution: relative names are searched under the **repository root** and the process **working directory**; `FEEDBACK_MODEL_DIR` overrides the sidebar when set.
+Railway gives you: **https://feedback-atlas.up.railway.app**
 
 ---
 
-### Step-by-step: ship `final_feedback_classifier/` with Git LFS (Streamlit Cloud)
+## Option C — Render (free tier, auto-deploys from GitHub)
 
-Do this **once** on your PC, inside your clone of the repo (same folder as `app.py`).
-
-**1. Install Git LFS**
-
-- Windows: [Git LFS releases](https://git-lfs.github.com/) installer, or `winget install GitHub.GitLFS`, then reopen the terminal.
-- macOS: `brew install git-lfs`
-- Linux: `sudo apt install git-lfs` (or your package manager)
-
-Then enable it for your user:
-
-```bash
-git lfs install
-```
-
-**2. Tell Git LFS which files inside the model folder are large**
-
-Create or edit **`.gitattributes`** in the **repo root** (next to `app.py`) so weights are stored as LFS pointers, not giant normal Git blobs:
-
-```gitattributes
-# Hugging Face classifier weights (adjust if your export uses different names)
-final_feedback_classifier/*.safetensors filter=lfs diff=lfs merge=lfs -text
-final_feedback_classifier/**/*.safetensors filter=lfs diff=lfs merge=lfs -text
-final_feedback_classifier/*.bin filter=lfs diff=lfs merge=lfs -text
-```
-
-If you only have `model.safetensors`, the first line is enough.
-
-**3. Stop ignoring the model folder**
-
-In **`.gitignore`**, delete or comment out this line (only the one for the folder you are shipping):
-
-```gitignore
-final_feedback_classifier/
-```
-
-Leave `final_feedback_classifier_v2/` ignored if you do not need it on Cloud.
-
-**4. Add, commit, push**
-
-```bash
-git add .gitattributes .gitignore
-git add final_feedback_classifier/
-git status   # you should see "LFS" next to large files if LFS is active
-git commit -m "Add classifier for Streamlit Cloud (Git LFS)"
-git push origin main
-```
-
-**5. Redeploy Streamlit Cloud**
-
-Open your app on [share.streamlit.io](https://share.streamlit.io) → **Reboot** or trigger a redeploy so it pulls the latest commit.
-
-**Notes**
-
-- GitHub gives a **free LFS quota** (storage + bandwidth). If `git push` complains about LFS, check [Billing → Plans](https://github.com/settings/billing) or add a **data pack**, or shrink the model / use fewer files.
-- If you **already committed** `model.safetensors` as a normal (non-LFS) file, fix history with  
-  `git lfs migrate import --include="*.safetensors" --everything`  
-  (rewrites commits; coordinate if others use the repo.)
+1. New Web Service → connect GitHub repo
+2. Build command: `pip install -r backend/requirements.txt`
+3. Start command: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
+4. Add a **Disk** at `/app/models`, 20 GB
+5. Environment variables:
+   ```
+   TOKENIZERS_PARALLELISM=false
+   PYTHON_VERSION=3.11
+   ```
 
 ---
 
-### Step-by-step: Docker / VPS with `FEEDBACK_MODEL_DIR`
+## Environment variables
 
-Use this when the model lives **on the server disk** (or in a volume), not inside the Git clone.
-
-**1. Put the folder on the host**
-
-Example host path:
-
-```text
-/opt/models/final_feedback_classifier/
-```
-
-That directory must contain `config.json`, tokenizer files, and weights (`model.safetensors` or equivalent), same layout as after training.
-
-**2. Run Streamlit with a mount + env**
-
-Example **Docker** (Linux/macOS paths; on **Windows CMD** use `^` at line ends instead of `\`):
-
-```bash
-docker run --rm -p 8501:8501 \
-  -v /opt/models/final_feedback_classifier:/models/classifier:ro \
-  -e FEEDBACK_MODEL_DIR=/models/classifier \
-  -w /app \
-  python:3.12-bookworm \
-  bash -lc "pip install --no-cache-dir -r requirements.txt && streamlit run app.py --server.port=8501 --server.address=0.0.0.0"
-```
-
-Mount your real host folder into `/models/classifier` (left side of `-v` is host, right side is inside the container). `FEEDBACK_MODEL_DIR` must match the **in-container** path.
-
-**3. Behaviour**
-
-With `FEEDBACK_MODEL_DIR` set, the Streamlit app **auto-loads** that folder on startup (no sidebar click needed), as long as the path exists inside the container and contains `config.json`.
-
-**4. Reflex / Dockerfile in this repo**
-
-The same variable works for Reflex: set `FEEDBACK_MODEL_DIR` in the container environment and mount the folder to the path you use. See the `docker run` example in the Reflex section above.
-
-### Repo files added for you
-
-| File | Purpose |
-|------|---------|
-| `.gitattributes` | Routes `*.safetensors` / `*.bin` under `final_feedback_classifier/` through **Git LFS**. |
-| `Dockerfile` | Reflex image **bakes** `final_feedback_classifier/` and sets `FEEDBACK_MODEL_DIR=/app/final_feedback_classifier`. |
-| `Dockerfile.streamlit` | Slim Streamlit image; expects a **volume** at `/models/classifier` by default. |
-| `docker-compose.yml` | `docker compose up --build` → Streamlit on **:8501** with local folder mounted. Optional `reflex` service: `docker compose --profile reflex up --build` (set `API_URL` for public deploy). |
-| `.env.example` | Copy to `.env` and fill `FEEDBACK_MODEL_DIR` / `API_URL` when needed. |
-
-### Run on a server (any machine on your network)
-
-Streamlit already prints a **Network URL** when you use `address = 0.0.0.0`. This repo includes `.streamlit/config.toml` with:
-
-- `address = "0.0.0.0"` — listen on all interfaces  
-- `headless = true` — suitable for servers  
-
-Start with:
-
-```bash
-py -3.12 -m streamlit run app.py --server.port 8502
-```
-
-Open `http://<server-ip>:8502` from another device on the same network; for the whole internet, use a host with a public IP and firewall rules, or use **Streamlit Cloud**.
+| Variable | Required | Description |
+|---|---|---|
+| `CORS_ORIGINS` | No | Comma-separated allowed origins (default: `*`) |
+| `TOKENIZERS_PARALLELISM` | Yes | Set to `false` to avoid HuggingFace warnings |
+| `VITE_API_URL` | Frontend build | Full backend URL (empty = nginx proxy) |
 
 ---
 
-## Fixes applied in the Reflex app
+## CI/CD (GitHub Actions)
 
-- **Background jobs** (`Run predictions`, minority) now read CSV column state inside `async with self`, so text columns and uploads are not “empty” during inference (a common Reflex bug).
-- **`FEEDBACK_MODEL_DIR`** and smarter **relative model path** resolution for servers.
-- **`API_URL`** in `rxconfig.py` for public deployments.
+The workflow in `.github/workflows/deploy.yml` auto-deploys on push to `main`.
+
+### Required secrets (GitHub → Settings → Secrets):
+
+| Secret | Used by |
+|---|---|
+| `FLY_API_TOKEN` | Fly.io deploy |
+| `RAILWAY_TOKEN` | Railway deploy |
+| `VERCEL_TOKEN` | Vercel frontend deploy |
+| `VERCEL_ORG_ID` | Vercel |
+| `VERCEL_PROJECT_ID` | Vercel |
+| `VITE_API_URL` | Frontend build (e.g. `https://feedback-atlas-api.fly.dev`) |
+
+### Required variable (GitHub → Settings → Variables):
+
+| Variable | Value |
+|---|---|
+| `DEPLOY_TARGET` | `fly`, `railway`, or `vercel` |
+
+---
+
+## Performance guide
+
+### With NVIDIA GPU (A30, V100, A100)
+
+| Rows | Time (before) | Time (after) |
+|---|---|---|
+| 10,000 | ~5 min | **~45 sec** |
+| 50,000 | ~23 min | **~3 min** |
+| 200,000 | ~90 min | **~10 min** |
+
+Speedups achieved:
+- FP16 inference + GPU warmup: classifier 23 rows/sec → **4,400 rows/sec**
+- Embedding batch 512 → 2048 + GPU: 140 rows/sec → **~600 rows/sec**
+- SSE streaming replaces polling (real-time, no client-side overhead)
+- Model cached across requests (zero reload time after first job)
+
+### Without GPU (CPU-only deployment)
+
+Use ONNX Runtime for 2–4× CPU speedup:
+```bash
+pip install onnxruntime
+python scripts/convert_to_onnx.py --model catme_feedback_classifier
+python scripts/convert_to_onnx.py --model professor_feedback_classifier
+```
+
+| Rows | PyTorch CPU | ONNX CPU |
+|---|---|---|
+| 50,000 | ~23 min | **~8 min** |
+
+---
+
+## Monitoring
+
+### Health check
+```bash
+curl https://your-app.fly.dev/health
+# → {"status":"ok","version":"3.0.0"}
+```
+
+### Log streaming (Fly.io)
+```bash
+fly logs --app feedback-atlas-api
+```
+
+### Metrics
+- Fly.io: built-in metrics at fly.io/apps/feedback-atlas-api/metrics
+- Railway: built-in logging dashboard
+- Self-hosted: `docker stats`
+
+---
+
+## Security checklist
+
+- [ ] Set `CORS_ORIGINS` to your frontend domain (not `*`) in production
+- [ ] Place models behind a private volume, not public object storage
+- [ ] Enable HTTPS (Fly.io/Railway/Vercel all do this automatically)
+- [ ] Rotate API tokens after first deploy
+- [ ] Set `client_max_body_size 100M` in nginx if you want to cap upload size
+
+---
+
+## Reproducing the full stack locally
+
+```bash
+# 1. Train models (requires SLURM / GPU)
+sbatch slurm/train_catme.sh
+sbatch slurm/train_professor.sh
+
+# 2. Start dev servers
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 &
+cd frontend && npm run dev
+
+# 3. Open http://localhost:5173
+```
+
+Or with Docker:
+```bash
+docker compose up --build
+# Open http://localhost
+```

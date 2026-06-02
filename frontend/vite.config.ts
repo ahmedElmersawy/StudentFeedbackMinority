@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    allowedHosts: true,       // required for cloudflared / bore.pub tunnels
     proxy: {
       "/health": "http://localhost:8000",
       "/predict": "http://localhost:8000",

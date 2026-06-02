@@ -1,13 +1,9 @@
 model:
   base_model: "distilroberta-base"
   max_length: 256
-  batch_size: 32
-  # Student→Student model
+  batch_size: 64
   catme_output_dir: "catme_feedback_classifier"
-  # Student→Professor model
   professor_output_dir: "professor_feedback_classifier"
-  # Legacy default (still used by existing /predict endpoint)
-  output_dir: "final_feedback_classifier"
 
 training:
   num_epochs: 10
@@ -23,7 +19,12 @@ training:
   test_size: 0.2
   random_state: 42
   fp16: true
-  undersample_ratio: 3  # cap dominant class at 3× the second-largest class
+  undersample_ratio: 3  # cap every class at 3× the second-largest class (applied per-label, not just dominant)
+  # Labels that should NOT get the minority weight multiplier — they are common and
+  # getting extra weight would cause the model to over-predict them.
+  non_minority_labels:
+    - "Majority_Positive"
+    - "Self_Positive"
   eval_strategy: "steps"   # "steps" for large datasets, "epoch" for small
   eval_steps: 10000         # evaluate every 10K steps (avoids 75-min epoch waits)
 
@@ -140,13 +141,13 @@ labels:
 # Zero-shot candidate strings for each mode/subtype (maps to label_map in pipeline)
 zero_shot_candidates:
   peer_feedback:
-    - "teammate did not contribute or do their work"
-    - "teammate did not communicate or went silent"
-    - "teammate missed meetings or deadlines"
-    - "teammate caused conflict or had bad attitude"
-    - "specific suggestion for teammate improvement"
-    - "teammate from underrepresented background facing barriers"
-    - "generic praise for teammate with no specific concerns"
+    - "teammate did not contribute, do their work, dropped out, or quit the team"
+    - "teammate did not respond to messages, was hard to reach, or went silent throughout the project"
+    - "teammate missed meetings or deadlines repeatedly"
+    - "teammate caused conflict or had a bad attitude toward the team"
+    - "the main point of this comment is a specific actionable suggestion for how the teammate should improve, not just praise with a minor note"
+    - "teammate explicitly faces barriers due to language, disability, race, gender, or immigration status"
+    - "comment is overall positive praise for the teammate with no significant criticism"
 
   self_assessment:
     - "student acknowledges they underperformed or struggled"
@@ -183,13 +184,13 @@ zero_shot_candidates:
 # Zero-shot label_map: candidate string → label name
 zero_shot_label_map:
   peer_feedback:
-    "teammate did not contribute or do their work": "Negative_Contribution"
-    "teammate did not communicate or went silent": "Negative_Communication"
-    "teammate missed meetings or deadlines": "Negative_Reliability"
-    "teammate caused conflict or had bad attitude": "Negative_Attitude"
-    "specific suggestion for teammate improvement": "Suggestion_To_Peer"
-    "teammate from underrepresented background facing barriers": "Minority_Peer_Experience"
-    "generic praise for teammate with no specific concerns": "Majority_Positive"
+    "teammate did not contribute, do their work, dropped out, or quit the team": "Negative_Contribution"
+    "teammate did not respond to messages, was hard to reach, or went silent throughout the project": "Negative_Communication"
+    "teammate missed meetings or deadlines repeatedly": "Negative_Reliability"
+    "teammate caused conflict or had a bad attitude toward the team": "Negative_Attitude"
+    "the main point of this comment is a specific actionable suggestion for how the teammate should improve, not just praise with a minor note": "Suggestion_To_Peer"
+    "teammate explicitly faces barriers due to language, disability, race, gender, or immigration status": "Minority_Peer_Experience"
+    "comment is overall positive praise for the teammate with no significant criticism": "Majority_Positive"
 
   self_assessment:
     "student acknowledges they underperformed or struggled": "Self_Struggle"

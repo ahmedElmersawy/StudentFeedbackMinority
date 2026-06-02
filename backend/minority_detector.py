@@ -84,18 +84,77 @@ def detect_minority_patterns(
     min_cluster_size = min_cluster_size or cfg_md.get("min_cluster_size", 10)
     include_dbscan_noise = include_dbscan_noise or cfg_md.get("include_dbscan_noise", False)
 
-    logger.info("Embedding %d texts for minority detection…", len(texts))
-    embedder = SentenceTransformer(embedding_model)
-    emb = embedder.encode(texts, batch_size=64, show_progress_bar=True, convert_to_numpy=True)
+    # Deduplicate: encode unique texts only, then map back to full list.
+    unique_texts = list(dict.fromkeys(texts))
+    import os, torch as _torch
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    _device = "cuda" if _torch.cuda.is_available() else "cpu"
+    logger.info("Embedding %d unique texts (%d total) on %s…",
+                len(unique_texts), len(texts), _device)
+    embedder = SentenceTransformer(embedding_model, device=_device)
+    # Large batch = fewer Python/GPU round-trips; 2048 fits easily in 24 GB VRAM
+    _emb_bs = 2048 if _device == "cuda" else 512
+    unique_emb = embedder.encode(
+        unique_texts, batch_size=_emb_bs, show_progress_bar=True,
+        convert_to_numpy=True, normalize_embeddings=False,
+    )
+    text_to_idx = {t: i for i, t in enumerate(unique_texts)}
+    emb = unique_emb[[text_to_idx[t] for t in texts]]
 
     # IsolationForest (DO NOT CHANGE)
-    iso = IsolationForest(contamination=contamination, n_estimators=n_estimators, random_state=42)
+    iso = IsolationForest(contamination=contamination, n_estimators=n_estimators, random_state=42, n_jobs=-1)
     outlier_labels = iso.fit_predict(emb)
     outlier_mask = outlier_labels == -1
 
-    # DBSCAN small clusters (DO NOT CHANGE)
-    clusterer = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples, metric="euclidean")
-    cluster_labels = clusterer.fit_predict(emb)
+    # DBSCAN small clusters (DO NOT CHANGE algorithm).
+    # For large datasets run DBSCAN on a random sample and assign labels to the
+    # rest via nearest-neighbour lookup — turns O(n²) into O(sample²).
+    # Sample size: small enough for DBSCAN to be fast, large enough for quality.
+    DBSCAN_SAMPLE = 2000
+    if len(texts) > DBSCAN_SAMPLE:
+        logger.info("Large dataset (%d rows): DBSCAN on %d-row sample + GPU nearest-neighbor assignment.",
+                    len(texts), DBSCAN_SAMPLE)
+        rng = np.random.default_rng(42)
+        sample_idx = rng.choice(len(texts), DBSCAN_SAMPLE, replace=False)
+        sample_emb = emb[sample_idx]
+
+        # DBSCAN on the small sample — fast even on CPU (2000² is trivial)
+        clusterer = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples, metric="euclidean")
+        sample_labels = clusterer.fit_predict(sample_emb)
+
+        # Nearest-neighbour assignment: use GPU torch.cdist if available,
+        # otherwise fall back to CPU sklearn. GPU is ~200× faster for high-dim
+        # data (384 dims × 50k × 2k distances via batched GEMM).
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                logger.info("[minority] GPU nearest-neighbor assignment…")
+                _sample_t = _torch.from_numpy(sample_emb).cuda()
+                _GPU_CHUNK = 10_000   # rows per GPU batch — safe for 24 GB VRAM
+                nn_idx_parts = []
+                for start in range(0, len(emb), _GPU_CHUNK):
+                    _chunk = _torch.from_numpy(emb[start:start + _GPU_CHUNK]).cuda()
+                    # cdist: [chunk, 2000] — find nearest sample point per row
+                    _dists = _torch.cdist(_chunk, _sample_t)
+                    nn_idx_parts.append(_torch.argmin(_dists, dim=1).cpu().numpy())
+                nn_idx = np.concatenate(nn_idx_parts)
+            else:
+                raise RuntimeError("no cuda")
+        except Exception as _e:
+            logger.info("[minority] CPU nearest-neighbor fallback (%s).", _e)
+            from sklearn.neighbors import NearestNeighbors
+            _nn = NearestNeighbors(n_neighbors=1, algorithm="brute", metric="euclidean", n_jobs=-1)
+            _nn.fit(sample_emb)
+            nn_idx_parts = []
+            for start in range(0, len(emb), 50_000):
+                _, _idx = _nn.kneighbors(emb[start:start + 50_000])
+                nn_idx_parts.append(_idx.flatten())
+            nn_idx = np.concatenate(nn_idx_parts)
+
+        cluster_labels = sample_labels[nn_idx]
+    else:
+        clusterer = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples, metric="euclidean")
+        cluster_labels = clusterer.fit_predict(emb)
 
     minority_cluster_mask = np.zeros(len(texts), dtype=bool)
     for cid in np.unique(cluster_labels):

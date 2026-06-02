@@ -3,6 +3,4 @@ numpy
 scikit-learn
 torch
 transformers
-streamlit
 sentence-transformers
-reflex==0.9.1

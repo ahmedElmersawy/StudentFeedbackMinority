@@ -1,0 +1,52 @@
+# Fly.io deployment — https://fly.io/docs/reference/configuration/
+# Run: fly launch --no-deploy, then fly deploy
+# Your app will be at: https://<app-name>.fly.dev
+
+app = "feedback-atlas"
+primary_region = "ord"        # Chicago — change to your nearest region
+kill_signal = "SIGINT"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "backend/Dockerfile"
+
+[env]
+  TOKENIZERS_PARALLELISM = "false"
+  PORT = "8000"
+
+[[mounts]]
+  source      = "model_weights"
+  destination = "/app/models"
+  initial_size = "20gb"
+
+[[vm]]
+  memory = "8gb"
+  cpu_kind = "shared"
+  cpus = 4
+
+# GPU support (uncomment for GPU instance — costs more):
+# [[vm]]
+#   size = "a100-40gb"
+
+[http_service]
+  internal_port        = 8000
+  force_https          = true
+  auto_stop_machines   = false      # keep warm for low latency
+  auto_start_machines  = true
+  min_machines_running = 1
+  processes            = ["app"]
+
+  [http_service.concurrency]
+    type       = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+[[http_service.checks]]
+  grace_period  = "60s"
+  interval      = "30s"
+  method        = "GET"
+  path          = "/health"
+  timeout       = "10s"
+
+[processes]
+  app = "uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 1 --loop uvloop"
