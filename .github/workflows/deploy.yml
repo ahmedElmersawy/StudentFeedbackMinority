@@ -46,6 +46,7 @@ jobs:
     name: Build images
     runs-on: ubuntu-latest
     needs: check
+    if: vars.DEPLOY_TARGET != ''     # skip when no deploy target is configured
     permissions:
       contents: read
       packages: write
