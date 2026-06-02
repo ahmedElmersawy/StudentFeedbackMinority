@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/ahmedElmersawy/StudentFeedbackMinority/actions/workflows/deploy.yml/badge.svg)](https://github.com/ahmedElmersawy/StudentFeedbackMinority/actions/workflows/deploy.yml)
 
-**🔗 Live Demo:** https://disclosure-lands-consensus-amount.trycloudflare.com
+**🔗 Live Demo:** https://additional-reserve-prizes-civilization.trycloudflare.com
 
 Upload a CSV of student feedback and get back:
 - **Label classification** across 11 CATME or 24 professor dimensions
@@ -162,7 +162,3 @@ CI/CD is configured via GitHub Actions — set repo variable `DEPLOY_TARGET=fly`
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS |
 | Real-time | Server-Sent Events (SSE) with 10s keepalive |
 | Deployment | Docker, nginx, Fly.io / Railway |
-
----
-
-*Developed at Purdue University — Department of Computer Science*
