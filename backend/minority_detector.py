@@ -8,6 +8,7 @@ DO NOT CHANGE:
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -17,18 +18,29 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# One GPU job at a time — prevents concurrent SentenceTransformer loads from OOMing
+_gpu_lock = threading.Semaphore(1)
+
+# Global SentenceTransformer cache — load once, reuse across all jobs
+_embedder_cache: dict[str, object] = {}
+
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
+# ---------------------------------------------------------------------------
+# Config — cached to avoid repeated YAML I/O on every detection call
+# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
+_cfg_cache: Optional[dict] = None
 
 def _cfg() -> dict:
-    if _CONFIG_PATH.exists():
-        with open(_CONFIG_PATH, encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    return {}
+    global _cfg_cache
+    if _cfg_cache is None:
+        if _CONFIG_PATH.exists():
+            with open(_CONFIG_PATH, encoding="utf-8") as f:
+                _cfg_cache = yaml.safe_load(f) or {}
+        else:
+            _cfg_cache = {}
+    return _cfg_cache
 
 
 # ---------------------------------------------------------------------------
@@ -84,20 +96,74 @@ def detect_minority_patterns(
     min_cluster_size = min_cluster_size or cfg_md.get("min_cluster_size", 10)
     include_dbscan_noise = include_dbscan_noise or cfg_md.get("include_dbscan_noise", False)
 
+    # For very large datasets, sample texts for minority detection to avoid OOM.
+    # IsolationForest + DBSCAN on 816k × 384-dim exhausts system RAM.
+    # We run detection on a representative sample, then assign labels via
+    # nearest-neighbour (same approach as DBSCAN sampling already does).
+    EMB_SAMPLE_CAP = int(cfg_md.get("emb_sample_cap", 100_000))
+    full_texts = texts
+    full_n = len(texts)
+    sampled = False
+    sample_idx: Optional[np.ndarray] = None
+
+    if full_n > EMB_SAMPLE_CAP:
+        rng = np.random.default_rng(42)
+        sample_idx = rng.choice(full_n, EMB_SAMPLE_CAP, replace=False)
+        texts = [full_texts[i] for i in sample_idx]
+        logger.info("Large dataset (%d rows): capping minority detection at %d sampled rows.", full_n, EMB_SAMPLE_CAP)
+        sampled = True
+
     # Deduplicate: encode unique texts only, then map back to full list.
     unique_texts = list(dict.fromkeys(texts))
-    import os, torch as _torch
+    import hashlib, os, torch as _torch
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     _device = "cuda" if _torch.cuda.is_available() else "cpu"
-    logger.info("Embedding %d unique texts (%d total) on %s…",
-                len(unique_texts), len(texts), _device)
-    embedder = SentenceTransformer(embedding_model, device=_device)
-    # Large batch = fewer Python/GPU round-trips; 2048 fits easily in 24 GB VRAM
-    _emb_bs = 2048 if _device == "cuda" else 512
-    unique_emb = embedder.encode(
-        unique_texts, batch_size=_emb_bs, show_progress_bar=True,
-        convert_to_numpy=True, normalize_embeddings=False,
-    )
+
+    # ── Persistent embedding cache ─────────────────────────────────────────
+    _CACHE_DIR = Path("/tmp/fa_emb_cache")
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _text_hash(t: str) -> str:
+        return hashlib.sha256(t.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+    cached_embs:   dict[str, np.ndarray] = {}
+    uncached_texts: list[str] = []
+    for t in unique_texts:
+        h   = _text_hash(t)
+        fp  = _CACHE_DIR / f"{h}.npy"
+        if fp.exists():
+            try:
+                cached_embs[t] = np.load(fp)
+            except Exception:
+                uncached_texts.append(t)
+        else:
+            uncached_texts.append(t)
+
+    logger.info("Embedding %d unique texts (%d total, %d cached) on %s…",
+                len(unique_texts), len(texts), len(cached_embs), _device)
+
+    if uncached_texts:
+        # Acquire GPU lock — prevents concurrent jobs from OOMing the GPU
+        with _gpu_lock:
+            if embedding_model not in _embedder_cache:
+                _embedder_cache[embedding_model] = SentenceTransformer(embedding_model, device=_device)
+            embedder = _embedder_cache[embedding_model]
+            _emb_bs  = 2048 if _device == "cuda" else 512
+            new_embs = embedder.encode(
+                uncached_texts, batch_size=_emb_bs, show_progress_bar=False,
+                convert_to_numpy=True, normalize_embeddings=False,
+            )
+        for t, vec in zip(uncached_texts, new_embs):
+            h  = _text_hash(t)
+            fp = _CACHE_DIR / f"{h}.npy"
+            try:
+                np.save(fp, vec)
+            except Exception:
+                pass
+            cached_embs[t] = vec
+
+    # Reconstruct full embedding matrix in original order
+    unique_emb = np.stack([cached_embs[t] for t in unique_texts])
     text_to_idx = {t: i for i, t in enumerate(unique_texts)}
     emb = unique_emb[[text_to_idx[t] for t in texts]]
 
@@ -109,32 +175,27 @@ def detect_minority_patterns(
     # DBSCAN small clusters (DO NOT CHANGE algorithm).
     # For large datasets run DBSCAN on a random sample and assign labels to the
     # rest via nearest-neighbour lookup — turns O(n²) into O(sample²).
-    # Sample size: small enough for DBSCAN to be fast, large enough for quality.
     DBSCAN_SAMPLE = 2000
-    if len(texts) > DBSCAN_SAMPLE:
+    n_emb = len(texts)  # may be capped by EMB_SAMPLE_CAP
+    if n_emb > DBSCAN_SAMPLE:
         logger.info("Large dataset (%d rows): DBSCAN on %d-row sample + GPU nearest-neighbor assignment.",
-                    len(texts), DBSCAN_SAMPLE)
-        rng = np.random.default_rng(42)
-        sample_idx = rng.choice(len(texts), DBSCAN_SAMPLE, replace=False)
-        sample_emb = emb[sample_idx]
+                    n_emb, DBSCAN_SAMPLE)
+        rng_db = np.random.default_rng(43)
+        dbscan_idx = rng_db.choice(n_emb, DBSCAN_SAMPLE, replace=False)
+        dbscan_emb = emb[dbscan_idx]
 
-        # DBSCAN on the small sample — fast even on CPU (2000² is trivial)
         clusterer = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples, metric="euclidean")
-        sample_labels = clusterer.fit_predict(sample_emb)
+        dbscan_labels = clusterer.fit_predict(dbscan_emb)
 
-        # Nearest-neighbour assignment: use GPU torch.cdist if available,
-        # otherwise fall back to CPU sklearn. GPU is ~200× faster for high-dim
-        # data (384 dims × 50k × 2k distances via batched GEMM).
         try:
             import torch as _torch
             if _torch.cuda.is_available():
                 logger.info("[minority] GPU nearest-neighbor assignment…")
-                _sample_t = _torch.from_numpy(sample_emb).cuda()
-                _GPU_CHUNK = 10_000   # rows per GPU batch — safe for 24 GB VRAM
+                _sample_t = _torch.from_numpy(dbscan_emb).cuda()
+                _GPU_CHUNK = 10_000
                 nn_idx_parts = []
-                for start in range(0, len(emb), _GPU_CHUNK):
+                for start in range(0, n_emb, _GPU_CHUNK):
                     _chunk = _torch.from_numpy(emb[start:start + _GPU_CHUNK]).cuda()
-                    # cdist: [chunk, 2000] — find nearest sample point per row
                     _dists = _torch.cdist(_chunk, _sample_t)
                     nn_idx_parts.append(_torch.argmin(_dists, dim=1).cpu().numpy())
                 nn_idx = np.concatenate(nn_idx_parts)
@@ -144,19 +205,19 @@ def detect_minority_patterns(
             logger.info("[minority] CPU nearest-neighbor fallback (%s).", _e)
             from sklearn.neighbors import NearestNeighbors
             _nn = NearestNeighbors(n_neighbors=1, algorithm="brute", metric="euclidean", n_jobs=-1)
-            _nn.fit(sample_emb)
+            _nn.fit(dbscan_emb)
             nn_idx_parts = []
-            for start in range(0, len(emb), 50_000):
+            for start in range(0, n_emb, 50_000):
                 _, _idx = _nn.kneighbors(emb[start:start + 50_000])
                 nn_idx_parts.append(_idx.flatten())
             nn_idx = np.concatenate(nn_idx_parts)
 
-        cluster_labels = sample_labels[nn_idx]
+        cluster_labels = dbscan_labels[nn_idx]
     else:
         clusterer = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples, metric="euclidean")
         cluster_labels = clusterer.fit_predict(emb)
 
-    minority_cluster_mask = np.zeros(len(texts), dtype=bool)
+    minority_cluster_mask = np.zeros(n_emb, dtype=bool)
     for cid in np.unique(cluster_labels):
         if cid == -1:
             continue
@@ -170,11 +231,32 @@ def detect_minority_patterns(
         minority_mask |= noise_mask
 
     out = df.copy()
-    out["is_outlier"] = outlier_mask
-    out["is_minority_cluster"] = minority_cluster_mask
-    out["is_noise"] = noise_mask
-    out["cluster_id"] = cluster_labels
-    out["is_minority_pattern"] = minority_mask
+    if sampled and sample_idx is not None:
+        # Map sample-level flags back to full DataFrame (unsampled rows → False / -1)
+        full_is_outlier  = np.zeros(full_n, dtype=bool)
+        full_is_cluster  = np.zeros(full_n, dtype=bool)
+        full_is_noise    = np.zeros(full_n, dtype=bool)
+        full_is_minority = np.zeros(full_n, dtype=bool)
+        full_cluster_ids = np.full(full_n, -1, dtype=int)
+        full_is_outlier[sample_idx]  = outlier_mask
+        full_is_cluster[sample_idx]  = minority_cluster_mask
+        full_is_noise[sample_idx]    = noise_mask
+        full_is_minority[sample_idx] = minority_mask
+        full_cluster_ids[sample_idx] = cluster_labels
+        out["is_outlier"]          = full_is_outlier
+        out["is_minority_cluster"] = full_is_cluster
+        out["is_noise"]            = full_is_noise
+        out["cluster_id"]          = full_cluster_ids
+        out["is_minority_pattern"] = full_is_minority
+        # Use full_texts for categorisation
+        texts = full_texts
+        minority_mask = full_is_minority
+    else:
+        out["is_outlier"]          = outlier_mask
+        out["is_minority_cluster"] = minority_cluster_mask
+        out["is_noise"]            = noise_mask
+        out["cluster_id"]          = cluster_labels
+        out["is_minority_pattern"] = minority_mask
 
     if pred_df is not None and "prediction" in pred_df.columns:
         out["prediction"] = pred_df["prediction"].values
@@ -231,14 +313,25 @@ def categorize_minority_rows(
     results: list[str] = [""] * len(texts)
     needs_zs: list[int] = []
 
-    for i, text in enumerate(texts):
-        if not minority_mask[i]:
-            continue
-        matched = _keyword_match(text, keyword_map)
-        if matched:
-            results[i] = "|".join(matched)
-        else:
-            needs_zs.append(i)
+    # Vectorized keyword matching on flagged texts only
+    flagged_indices = [i for i, v in enumerate(minority_mask) if v]
+    if flagged_indices and keyword_map:
+        import re as _re
+        flagged_texts_lower = [texts[i].lower() for i in flagged_indices]
+        cat_names = list(keyword_map.keys())
+        # Build regex per category: compile once, apply to all texts at once
+        cat_patterns = {
+            cat: _re.compile("|".join(_re.escape(kw) for kw in kws), _re.IGNORECASE)
+            for cat, kws in keyword_map.items() if kws
+        }
+        for j, (gi, tl) in enumerate(zip(flagged_indices, flagged_texts_lower)):
+            matched = [cat for cat, pat in cat_patterns.items() if pat.search(tl)]
+            if matched:
+                results[gi] = "|".join(matched)
+            else:
+                needs_zs.append(gi)
+    elif flagged_indices:
+        needs_zs = flagged_indices
 
     # Optional zero-shot pass (for rows that had no keyword match)
     if needs_zs and zero_shot_model:

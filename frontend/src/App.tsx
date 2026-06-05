@@ -29,7 +29,8 @@ const STAGES: PipelineStageInfo[] = [
 ];
 
 // ── History helpers ───────────────────────────────────────────────────────────
-const HISTORY_KEY = "fa_analysis_history";
+const HISTORY_KEY  = "fa_analysis_history";
+const LAST_JOB_KEY = "fa_last_job";
 
 function loadHistory(): HistoryItem[] {
   try { return JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]"); }
@@ -38,6 +39,21 @@ function loadHistory(): HistoryItem[] {
 
 function saveHistory(items: HistoryItem[]) {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(0, 20)));
+}
+
+function saveLastJob(jobId: string, filename: string) {
+  localStorage.setItem(LAST_JOB_KEY, JSON.stringify({ jobId, filename, savedAt: Date.now() }));
+}
+
+function loadLastJob(): { jobId: string; filename: string } | null {
+  try {
+    const raw = localStorage.getItem(LAST_JOB_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    // Discard if older than 2 hours (backend purges jobs from memory)
+    if (Date.now() - (data.savedAt ?? 0) > 2 * 60 * 60 * 1000) return null;
+    return data;
+  } catch { return null; }
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -89,6 +105,29 @@ export default function App() {
   const navigate = useCallback((v: View) => {
     setView(v);
     setSidebarOpen(false);
+  }, []);
+
+  // Restore last job from localStorage on first load
+  useEffect(() => {
+    const saved = loadLastJob();
+    if (!saved) return;
+    const { jobId: savedId, filename: savedFile } = saved;
+
+    // Check if job is still alive on the backend
+    import("./api/client").then(({ pollJob, fetchResults, fetchAggregate }) => {
+      pollJob(savedId).then(status => {
+        if (status.status !== "done") return;   // expired or errored — skip
+        fetchResults(savedId).then(analysis => {
+          setResult(analysis);
+          setPhase("done");
+          setJobId(savedId);
+          setFilename(savedFile);
+          showToast("Previous results restored");
+          fetchAggregate(savedId).then(setAggregate).catch(() => null);
+        }).catch(() => null);
+      }).catch(() => null);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Fetch aggregate once job is done
@@ -189,6 +228,7 @@ export default function App() {
       completeStages();
       showToast("Analysis complete — results ready");
       navigate("dashboard");
+      saveLastJob(job_id, file.name);
 
       // Save to history
       const hi: HistoryItem = {

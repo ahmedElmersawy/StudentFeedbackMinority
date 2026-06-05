@@ -6,13 +6,15 @@ import io
 import json
 import logging
 import os
+import time
 import uuid
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -49,6 +51,27 @@ _jobs: dict[str, dict[str, Any]] = {}
 # Split output files are stored here while the job is alive
 _OUTPUT_DIR = Path("/tmp/feedback_atlas_outputs")
 _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Rate limiting — simple in-memory token bucket per IP
+# ---------------------------------------------------------------------------
+_MAX_FILE_MB  = int(os.environ.get("MAX_UPLOAD_MB", "500"))   # 500 MB default
+_RATE_WINDOW  = 60          # seconds per window
+_RATE_MAX     = 5           # max uploads per window per IP
+_rate_log: dict[str, list[float]] = defaultdict(list)
+
+def _check_rate(request: Request) -> None:
+    """Allow MAX uploads per IP per 60 s. Raises 429 if exceeded."""
+    ip  = request.client.host if request.client else "unknown"
+    now = time.time()
+    hits = [t for t in _rate_log[ip] if now - t < _RATE_WINDOW]
+    if len(hits) >= _RATE_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit: max {_RATE_MAX} uploads per {_RATE_WINDOW}s. Try again shortly.",
+        )
+    hits.append(now)
+    _rate_log[ip] = hits
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +149,7 @@ def predict(req: PredictRequest):
 
 @app.post("/upload")
 async def upload(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     feedback_mode: Optional[str] = Form(None),
@@ -143,12 +167,19 @@ async def upload(
     generate_split_outputs: if True, write per-mode split CSVs to /tmp.
     Returns job_id; poll /jobs/{job_id} for status.
     """
+    _check_rate(request)   # 429 if IP exceeds rate limit
+
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only .csv files are accepted.")
 
     contents = await file.read()
     if len(contents) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(contents) > _MAX_FILE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large ({len(contents)//1024//1024} MB). Max allowed: {_MAX_FILE_MB} MB.",
+        )
 
     if feedback_mode and feedback_mode not in ("student_to_student", "student_to_professor"):
         raise HTTPException(

@@ -5,6 +5,7 @@ import io
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Optional, Union
 
@@ -12,12 +13,19 @@ import numpy as np
 import pandas as pd
 import yaml
 
+# Import transformers at module level (single-threaded, at startup).
+# Importing inside run_inference() caused ImportError when two jobs ran
+# concurrently: transformers' lazy-loader wasn't fully initialised in
+# thread A when thread B tried to access AutoModelForSequenceClassification.
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Model cache — load each model once per process lifetime
 # ---------------------------------------------------------------------------
 _model_cache: dict[str, tuple] = {}  # str(path) -> (tokenizer, model, device, id2label)
+_model_load_lock = threading.Lock()  # prevents two threads loading the same model simultaneously
 
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,11 +34,17 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Config helpers
 # ---------------------------------------------------------------------------
 
+_cfg_cache: Optional[dict] = None
+
 def _cfg() -> dict:
-    if _CONFIG_PATH.exists():
-        with open(_CONFIG_PATH, encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    return {}
+    global _cfg_cache
+    if _cfg_cache is None:
+        if _CONFIG_PATH.exists():
+            with open(_CONFIG_PATH, encoding="utf-8") as f:
+                _cfg_cache = yaml.safe_load(f) or {}
+        else:
+            _cfg_cache = {}
+    return _cfg_cache
 
 
 def _resolve_model(name: Optional[str] = None) -> Path:
@@ -555,10 +569,8 @@ def run_inference(
     progress_callback=None,
 ) -> pd.DataFrame:
     """Run the fine-tuned classifier on df['text']."""
-    import os
     import torch
     torch.set_num_threads(os.cpu_count() or 1)
-    from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     cfg = _cfg()
     bs = batch_size or cfg.get("model", {}).get("batch_size", 32)
@@ -570,45 +582,49 @@ def run_inference(
 
     cache_key = str(mdir)
     if cache_key not in _model_cache:
-        logger.info("[inference] Loading model from %s (first time — caching for reuse)", mdir)
+        # Lock prevents two threads loading the same model simultaneously.
+        # Second thread waits here and uses the cached result after the first finishes.
+        with _model_load_lock:
+            if cache_key not in _model_cache:   # re-check inside lock
+                logger.info("[inference] Loading model from %s (first time — caching for reuse)", mdir)
 
-        if progress_callback:
-            progress_callback(0, 0, 0)   # keep SSE alive during load
-
-        tokenizer = AutoTokenizer.from_pretrained(mdir)
-
-        if progress_callback:
-            progress_callback(0, 0, 0)   # tokenizer done — stay alive
-
-        model = AutoModelForSequenceClassification.from_pretrained(mdir)
-        model.eval()
-        id2label = {int(k): v for k, v in model.config.id2label.items()}
-
-        if torch.cuda.is_available():
-            try:
-                torch.cuda.empty_cache()
-                model = model.half().to("cuda")   # FP16 — 2× throughput on GPU
-                device = "cuda"
-                logger.info("[inference] GPU warmup (compiling CUDA kernels)…")
                 if progress_callback:
-                    progress_callback(0, 0, 0)   # keep SSE alive during warmup
-                _dummy = tokenizer(["warmup"], return_tensors="pt", padding=True)
-                _dummy = {k: v.to("cuda") for k, v in _dummy.items()}
-                with torch.inference_mode():
-                    model(**_dummy)
-                torch.cuda.synchronize()
-                logger.info("[inference] GPU warmup complete.")
-            except torch.OutOfMemoryError:
-                model = model.float().to("cpu")
-                device = "cpu"
-        else:
-            device = "cpu"
+                    progress_callback(0, 0, 0)
 
-        _model_cache[cache_key] = (tokenizer, model, device, id2label)
-        logger.info("[inference] Model cached on %s (FP16=%s).", device, device == "cuda")
-    else:
-        logger.info("[inference] Using cached model from %s.", mdir)
-        tokenizer, model, device, id2label = _model_cache[cache_key]
+                tokenizer = AutoTokenizer.from_pretrained(mdir)
+
+                if progress_callback:
+                    progress_callback(0, 0, 0)
+
+                model = AutoModelForSequenceClassification.from_pretrained(mdir)
+                model.eval()
+                id2label = {int(k): v for k, v in model.config.id2label.items()}
+
+                if torch.cuda.is_available():
+                    try:
+                        torch.cuda.empty_cache()
+                        model = model.half().to("cuda")
+                        device = "cuda"
+                        logger.info("[inference] GPU warmup (compiling CUDA kernels)…")
+                        if progress_callback:
+                            progress_callback(0, 0, 0)
+                        _dummy = tokenizer(["warmup"], return_tensors="pt", padding=True)
+                        _dummy = {k: v.to("cuda") for k, v in _dummy.items()}
+                        with torch.inference_mode():
+                            model(**_dummy)
+                        torch.cuda.synchronize()
+                        logger.info("[inference] GPU warmup complete.")
+                    except torch.OutOfMemoryError:
+                        model = model.float().to("cpu")
+                        device = "cpu"
+                else:
+                    device = "cpu"
+
+                _model_cache[cache_key] = (tokenizer, model, device, id2label)
+                logger.info("[inference] Model cached on %s (FP16=%s).", device, device == "cuda")
+
+    logger.info("[inference] Using cached model from %s.", mdir)
+    tokenizer, model, device, id2label = _model_cache[cache_key]
 
     # Auto-scale batch size: GPU can handle much larger batches than CPU
     if device == "cuda" and bs <= 64:
@@ -822,12 +838,18 @@ def run_full_pipeline(
         cat_masks[cat] = lower_texts.str.contains(pattern, regex=True, na=False)
 
     kw_is_minority_series = pd.Series(False, index=df.index)
-    kw_categories_series: list[str] = []
     for mask in cat_masks.values():
         kw_is_minority_series |= mask
-    for i in df.index:
-        cats = [cat for cat, mask in cat_masks.items() if mask.at[i]]
-        kw_categories_series.append("|".join(cats))
+
+    # Vectorized category string: stack boolean masks into numpy array, join per row
+    if cat_masks:
+        cat_names = list(cat_masks.keys())
+        stack = np.column_stack([cat_masks[c].values for c in cat_names])  # (N, K) bool
+        kw_categories_series = [
+            "|".join(np.asarray(cat_names)[row].tolist()) for row in stack
+        ]
+    else:
+        kw_categories_series = [""] * len(df)
 
     df["keyword_minority"] = kw_is_minority_series
     df["keyword_categories"] = kw_categories_series
@@ -854,14 +876,10 @@ def run_full_pipeline(
         )
 
         # Merge keyword + embedding minority flags
-        # A row is minority if EITHER keyword OR embedding flags it
         df["is_minority_pattern"] = df["is_minority_pattern"] | df["keyword_minority"]
-        # Prefer keyword categories when available
-        df["minority_category"] = df.apply(
-            lambda row: row["keyword_categories"] if row["keyword_minority"]
-            else (row.get("minority_category", "") or ""),
-            axis=1,
-        )
+        # Prefer keyword categories; fall back to embedding category
+        emb_cat = df.get("minority_category", pd.Series("", index=df.index)).fillna("")
+        df["minority_category"] = np.where(df["keyword_minority"], df["keyword_categories"], emb_cat)
     else:
         # Keyword-only minority detection
         df["is_minority_pattern"] = df["keyword_minority"]
@@ -892,17 +910,26 @@ def run_full_pipeline(
     if cfg.get("minority_detection", {}).get("mixed_signal_detection", True):
         df = _detect_mixed_signals(df, cfg)
 
-    # Priority scoring (Step 7)
-    df["priority_score"] = df.apply(
-        lambda row: calculate_priority(
-            prediction=str(row.get("prediction", "")),
-            is_minority=bool(row.get("is_minority_pattern", False)),
-            minority_categories=str(row.get("minority_category", "")).split("|"),
-            confidence=float(row.get("confidence", 1.0)),
-            cfg=cfg,
-        ),
-        axis=1,
+    # Priority scoring (Step 7) — fully vectorized, no per-row Python overhead
+    _priority_cfg = cfg.get("priority", {})
+    _high        = set(_priority_cfg.get("high", []))
+    _medium      = set(_priority_cfg.get("medium", []))
+    _deprioritized = set(_priority_cfg.get("deprioritized", []))
+
+    _pred   = df["prediction"]
+    _is_min = df["is_minority_pattern"].astype(bool)
+    _has_real_min = _is_min & ~df["minority_category"].fillna("").str.contains(
+        "Statistical_Outlier_Only", na=False
     )
+    _conf = df["confidence"].astype(float)
+
+    _score = pd.Series(5, index=df.index, dtype=int)
+    _score = _score.where(~_pred.isin(_deprioritized), 1)
+    _score = _score.where(~_pred.isin(_medium), 7)
+    _score = _score.where(~_pred.isin(_high), 9)
+    _score = _score.where(~_has_real_min, 10)
+    _score = (_score + (_conf < 0.80).astype(int)).clip(upper=10)
+    df["priority_score"] = _score
 
     # Mismatch detection
     if include_mismatch and rating_col:

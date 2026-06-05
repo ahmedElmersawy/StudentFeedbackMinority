@@ -266,3 +266,117 @@ class TestMinorityDetector:
         assert breakdown["Mental_Health"] == 2
         assert breakdown["Financial_Hardship"] == 1
         assert "Caregiver" in breakdown
+
+
+# ---------------------------------------------------------------------------
+# backend.main — serialization helper
+# ---------------------------------------------------------------------------
+
+class TestSerialization:
+    def test_numpy_bool_serializable(self):
+        """`_to_python` must convert every numpy scalar to a JSON-safe type."""
+        from backend.main import _to_python
+        import json, numpy as np
+        data = {
+            "flag":   np.bool_(True),
+            "count":  np.int64(42),
+            "conf":   np.float32(0.87),
+            "nested": {"inner": np.bool_(False)},
+            "arr":    [np.int64(1), np.int64(2)],
+        }
+        result = _to_python(data)
+        json.dumps(result)                          # must not raise
+        assert result["flag"]  is True
+        assert result["count"] == 42
+        assert abs(result["conf"] - 0.87) < 0.01
+        assert result["nested"]["inner"] is False
+
+    def test_plain_types_pass_through(self):
+        from backend.main import _to_python
+        data = {"a": 1, "b": "hello", "c": [1, 2, 3], "d": None}
+        assert _to_python(data) == data
+
+
+# ---------------------------------------------------------------------------
+# Rate-limiting logic (pure logic, no server required)
+# ---------------------------------------------------------------------------
+
+class TestRateLimit:
+    def test_allows_up_to_max_requests(self):
+        import time
+        from collections import defaultdict
+        WINDOW, MAX = 60, 5
+        log: dict[str, list[float]] = defaultdict(list)
+        ip  = "1.2.3.4"
+        now = time.time()
+
+        for i in range(MAX):
+            hits = [t for t in log[ip] if now - t < WINDOW]
+            assert len(hits) < MAX, f"Should allow request {i + 1}"
+            hits.append(now)
+            log[ip] = hits
+
+        # 6th request must be blocked
+        hits = [t for t in log[ip] if now - t < WINDOW]
+        assert len(hits) >= MAX
+
+    def test_expired_entries_ignored(self):
+        import time
+        from collections import defaultdict
+        WINDOW, MAX = 60, 5
+        log: dict[str, list[float]] = defaultdict(list)
+        ip  = "5.6.7.8"
+        old = time.time() - 120          # 2 min ago — outside window
+        log[ip] = [old] * MAX
+
+        now = time.time()
+        hits = [t for t in log[ip] if now - t < WINDOW]
+        assert len(hits) == 0, "Expired hits must not count toward limit"
+
+
+# ---------------------------------------------------------------------------
+# API smoke tests (skipped when server is not running)
+# ---------------------------------------------------------------------------
+
+class TestAPISmoke:
+    @pytest.fixture(autouse=True)
+    def require_server(self):
+        import socket
+        s = socket.socket()
+        s.settimeout(1)
+        try:
+            s.connect(("localhost", 8000))
+            s.close()
+        except (ConnectionRefusedError, OSError):
+            pytest.skip("Backend not running")
+
+    def test_health_returns_ok(self):
+        import json, urllib.request
+        with urllib.request.urlopen("http://localhost:8000/health") as r:
+            d = json.loads(r.read())
+        assert d["status"] == "ok"
+        assert "version" in d
+
+    def test_upload_wrong_extension_returns_400(self):
+        import urllib.error, urllib.request
+        boundary = "bd123"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="test.txt"\r\n'
+            f"Content-Type: text/plain\r\n\r\nhello\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        req = urllib.request.Request(
+            "http://localhost:8000/upload", data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(req)
+        assert exc.value.code == 400
+
+    def test_missing_job_returns_404(self):
+        import urllib.error, urllib.request
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen("http://localhost:8000/jobs/does-not-exist")
+        assert exc.value.code == 404
