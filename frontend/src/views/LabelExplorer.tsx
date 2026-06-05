@@ -28,7 +28,7 @@ function LabelDetailPanel({ stat, jobId, total, onClose, onToast }: {
       </div>
       <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 20 }}>
         {/* Metrics */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 12 }}>
           {[
             { label: "Records",       value: stat.count.toLocaleString(),                         color: "var(--text-primary)" },
             { label: "% of Dataset",  value: `${stat.pct}%`,                                      color: "var(--brand)" },
@@ -180,7 +180,7 @@ export function LabelExplorer({ jobId, result, onToast }: Props) {
         })}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: selected ? "1fr 320px" : "1fr", gap: 16, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: selected ? "minmax(0,1fr) min(320px,100%)" : "1fr", gap: 16, alignItems: "start" }}>
         {/* Table */}
         <div className="card">
           {/* Toolbar */}

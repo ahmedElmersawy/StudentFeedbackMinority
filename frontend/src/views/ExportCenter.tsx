@@ -73,7 +73,7 @@ export function ExportCenter({ result, jobId, onToast }: Props) {
       </div>
 
       {/* Stats */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 14 }}>
         {[
           { label: "Total Records",    value: result.summary.total.toLocaleString(),     color: "var(--brand)" },
           { label: "Minority Records", value: result.summary.minority.toLocaleString(),  color: "var(--warning)" },

@@ -98,13 +98,13 @@ export function UploadPanel({ phase, jobMessage, jobProgress, onUpload, onReset 
               </div>
             </>
           )}
-          <input id="csv-upload" type="file" accept=".csv" style={{ display: "none" }}
+          <input id="csv-upload" type="file" accept=".csv" aria-label="Upload CSV file" style={{ display: "none" }}
             onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ""; }} />
         </label>
       </div>
 
       {/* Options */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 12 }}>
         <div>
           <label className="field-label">Feedback Mode</label>
           <select

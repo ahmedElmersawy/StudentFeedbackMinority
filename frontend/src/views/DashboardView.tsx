@@ -67,7 +67,6 @@ export function DashboardView({
   // Confidence slices for donut
   const confSlices = result ? (() => {
     const confs = result.rows.map(r => (typeof r.confidence === "number" ? r.confidence : 0));
-    const t = confs.length || 1;
     const hi  = confs.filter(c => c >= 0.9).length;
     const med = confs.filter(c => c >= 0.7 && c < 0.9).length;
     const lo  = confs.filter(c => c < 0.7).length;
@@ -196,7 +195,8 @@ export function DashboardView({
 
       {/* ── Charts row ─────────────────────────────────────────────── */}
       {result && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 380px", gap: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) min(380px,100%)", gap: 16 }}
+             className="charts-row">
 
           {/* Label distribution */}
           <div className="card">

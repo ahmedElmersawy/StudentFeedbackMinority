@@ -101,7 +101,7 @@ export function MinorityPanel({ result, onDownloadCsv }: Props) {
           { label: "Minority rows",       value: result.summary.minority,                             color: "var(--warning)" },
           { label: "% of dataset",        value: `${result.summary.minority_pct}%`,                  color: "var(--warning)" },
           { label: "Statistical outliers",value: result.rows.filter(r => r.is_outlier).length,       color: "var(--brand)" },
-          { label: "Small clusters",      value: result.rows.filter(r => r.is_minority_cluster).length, color: var_info() },
+          { label: "Small clusters",      value: result.rows.filter(r => r.is_minority_cluster).length, color: "var(--info)" },
         ].map(k => (
           <div key={k.label} className="card" style={{ padding: 16 }}>
             <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--text-muted)", marginBottom: 8 }}>{k.label}</div>
@@ -181,4 +181,3 @@ export function MinorityPanel({ result, onDownloadCsv }: Props) {
   );
 }
 
-function var_info() { return "var(--info)"; }

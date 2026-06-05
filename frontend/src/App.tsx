@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AnalysisResult, HistoryItem, JobStatus, Phase, PipelineStageInfo, View } from "./types";
 import {
   uploadCsv, waitForJob, fetchAggregate, downloadResultsCsv, downloadMinorityCsv,
@@ -82,7 +82,14 @@ export default function App() {
   const [startTime,   setStartTime]   = useState<number | null>(null);
   const [filename,    setFilename]    = useState<string>("");
   const [speed,       setSpeed]       = useState<number>(0);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const { msg: toast, show: showToast } = useToast();
+
+  // Close sidebar on navigation (mobile)
+  const navigate = useCallback((v: View) => {
+    setView(v);
+    setSidebarOpen(false);
+  }, []);
 
   // Fetch aggregate once job is done
   useEffect(() => {
@@ -181,7 +188,7 @@ export default function App() {
       setPhase("done");
       completeStages();
       showToast("Analysis complete — results ready");
-      setView("dashboard");
+      navigate("dashboard");
 
       // Save to history
       const hi: HistoryItem = {
@@ -223,8 +230,8 @@ export default function App() {
 
   const isRunning = phase === "uploading" || phase === "running";
 
-  // ── Nav config ──────────────────────────────────────────────────────────────
-  const navGroups: NavGroup[] = [
+  // ── Nav config (memoized — only rebuilds when result changes) ───────────────
+  const navGroups: NavGroup[] = useMemo(() => [
     {
       label: "Overview",
       items: [
@@ -251,11 +258,11 @@ export default function App() {
     {
       label: "Workspace",
       items: [
-        { id: "review",  label: "Review Queue", icon: "M1 3h14M1 7h10M1 11h6", requiresResult: true, badge: result?.summary.needs_review },
-        { id: "exports", label: "Export Center", icon: "M8 12V4M4 8l4 4 4-4M2 14h12",               requiresResult: true },
+        { id: "review",  label: "Review Queue",  icon: "M1 3h14M1 7h10M1 11h6", requiresResult: true, badge: result?.summary.needs_review },
+        { id: "exports", label: "Export Center", icon: "M8 12V4M4 8l4 4 4-4M2 14h12", requiresResult: true },
       ],
     },
-  ];
+  ], [result]);
 
   // ── Render helpers ──────────────────────────────────────────────────────────
   function renderView() {
@@ -272,7 +279,7 @@ export default function App() {
             history={history}
             startTime={startTime}
             filename={filename}
-            onNavigate={setView}
+            onNavigate={navigate}
             onUpload={handleUpload}
             onReset={handleReset}
           />
@@ -322,45 +329,64 @@ export default function App() {
             <SectionHeader title="All Results" sub={`${result.summary.total.toLocaleString()} records`} />
             <ResultsTable rows={result.rows} onDownloadCsv={jobId ? () => { downloadResultsCsv(jobId, "results.csv"); showToast("Downloading…"); } : undefined} />
           </div>
-        ) : <NoDataState onNavigate={setView} />;
+        ) : <NoDataState onNavigate={navigate} />;
       case "analysis-labels":
         return result && jobId ? (
           <LabelExplorer jobId={jobId} result={result} onToast={showToast} />
-        ) : <NoDataState onNavigate={setView} />;
+        ) : <NoDataState onNavigate={navigate} />;
       case "analysis-minority":
         return result ? (
           <div>
             <SectionHeader title="Minority Patterns" sub={`${result.summary.minority.toLocaleString()} flagged rows`} />
             <MinorityPanel result={result} onDownloadCsv={jobId ? () => { downloadMinorityCsv(jobId); showToast("Downloading minority CSV…"); } : undefined} />
           </div>
-        ) : <NoDataState onNavigate={setView} />;
+        ) : <NoDataState onNavigate={navigate} />;
       case "analysis-mismatch":
         return result ? (
           <div>
             <SectionHeader title="Mismatch Detection" sub={`${result.summary.mismatch.toLocaleString()} mismatches`} />
             <MismatchPanel result={result} />
           </div>
-        ) : <NoDataState onNavigate={setView} />;
+        ) : <NoDataState onNavigate={navigate} />;
       case "review":
         return result ? (
           <ReviewWorkspace result={result} />
-        ) : <NoDataState onNavigate={setView} />;
+        ) : <NoDataState onNavigate={navigate} />;
       case "exports":
         return result && jobId ? (
           <ExportCenter result={result} jobId={jobId} onToast={showToast} />
-        ) : <NoDataState onNavigate={setView} />;
+        ) : <NoDataState onNavigate={navigate} />;
       default:
-        return <NoDataState onNavigate={setView} />;
+        return <NoDataState onNavigate={navigate} />;
     }
   }
 
+  const currentLabel = navGroups.flatMap(g => g.items).find(i => i.id === view)?.label ?? "Dashboard";
+
   return (
     <div className="app-layout">
+      {/* Skip-to-content for keyboard users */}
+      <a href="#main-content" className="btn btn-primary btn-sm"
+        style={{ position: "absolute", top: -40, left: 8, zIndex: 9999, transition: "top 0.1s" }}
+        onFocus={e => { (e.currentTarget as HTMLElement).style.top = "8px"; }}
+        onBlur={e => { (e.currentTarget as HTMLElement).style.top = "-40px"; }}>
+        Skip to content
+      </a>
+
+      {/* Mobile sidebar overlay */}
+      {sidebarOpen && (
+        <div
+          className="sidebar-overlay open"
+          aria-hidden="true"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
       {/* ── Sidebar ────────────────────────────────────────────────── */}
-      <aside className="sidebar">
+      <aside className={`sidebar${sidebarOpen ? " open" : ""}`} aria-label="Main navigation">
         {/* Brand */}
         <div className="sidebar-brand">
-          <div className="brand-icon">
+          <div className="brand-icon" aria-hidden="true">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M3 13L8 3l5 10H3z"/>
             </svg>
@@ -376,38 +402,40 @@ export default function App() {
         </div>
 
         {/* Nav */}
-        <nav style={{ flex: 1, overflowY: "auto", padding: "4px 0" }}>
+        <nav role="navigation" aria-label="Sidebar" style={{ flex: 1, overflowY: "auto", padding: "4px 0" }}>
           {navGroups.map(group => (
             <div key={group.label} className="nav-section">
-              <div className="nav-section-label">{group.label}</div>
+              <div className="nav-section-label" aria-hidden="true">{group.label}</div>
               {group.items.map(item => {
                 const disabled = !!(item.requiresResult && !result);
                 const active   = view === item.id;
-                const badge    = (item.badge ?? 0) > 0 ? item.badge : 0;
+                const badge    = (item.badge ?? 0) > 0 ? (item.badge ?? 0) : 0;
+                const badgeBg  = item.id === "analysis-minority" ? "var(--warning-bg)"  :
+                                 item.id === "analysis-mismatch" ? "#fff7ed"             :
+                                 item.id === "review"            ? "var(--danger-bg)"   :
+                                 "var(--brand-light)";
+                const badgeCol = item.id === "analysis-minority" ? "var(--warning)"     :
+                                 item.id === "analysis-mismatch" ? "#c2410c"             :
+                                 item.id === "review"            ? "var(--danger)"      :
+                                 "var(--brand)";
                 return (
                   <button
                     key={item.id}
                     className={`nav-item${active ? " active" : ""}`}
                     disabled={disabled}
-                    onClick={() => setView(item.id)}
+                    aria-current={active ? "page" : undefined}
+                    aria-disabled={disabled}
+                    aria-label={disabled ? `${item.label} (upload a dataset first)` : item.label}
+                    onClick={() => navigate(item.id)}
                   >
-                    <Icon d={item.icon} size={14} />
+                    <Icon d={item.icon} size={14} aria-hidden />
                     <span style={{ flex: 1 }}>{item.label}</span>
                     {isRunning && item.id === "pipeline" && (
-                      <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--brand)", display: "inline-block", animation: "pulse-dot 1.2s infinite" }} />
+                      <span aria-label="running" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--brand)", display: "inline-block", animation: "pulse-dot 1.2s infinite" }} />
                     )}
-                    {badge! > 0 && !active && (
-                      <span className="nav-badge" style={{
-                        background: item.id === "analysis-minority" ? "var(--warning-bg)" :
-                                    item.id === "analysis-mismatch" ? "#fff7ed" :
-                                    item.id === "review"            ? "var(--danger-bg)" :
-                                    "var(--brand-light)",
-                        color: item.id === "analysis-minority" ? "var(--warning)" :
-                               item.id === "analysis-mismatch" ? "#c2410c" :
-                               item.id === "review"            ? "var(--danger)" :
-                               "var(--brand)",
-                      }}>
-                        {badge! > 999 ? `${(badge! / 1000).toFixed(1)}k` : badge}
+                    {badge > 0 && !active && (
+                      <span className="nav-badge" aria-label={`${badge} items`} style={{ background: badgeBg, color: badgeCol }}>
+                        {badge > 999 ? `${(badge / 1000).toFixed(1)}k` : badge}
                       </span>
                     )}
                   </button>
@@ -418,9 +446,9 @@ export default function App() {
         </nav>
 
         {/* Status footer */}
-        <div style={{ borderTop: "1px solid var(--border)", padding: "12px 16px" }}>
+        <div role="status" aria-live="polite" style={{ borderTop: "1px solid var(--border)", padding: "12px 16px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-            <span style={{
+            <span aria-hidden="true" style={{
               width: 7, height: 7, borderRadius: "50%",
               background: isRunning ? "var(--brand)" : phase === "done" ? "var(--success)" : "#d1d5db",
               display: "inline-block",
@@ -441,29 +469,44 @@ export default function App() {
       {/* ── Main area ──────────────────────────────────────────────── */}
       <div className="main-area">
         {/* Top bar */}
-        <div className="top-bar">
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
-            <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Feedback Atlas</span>
-            <span style={{ color: "var(--text-muted)", fontSize: 12 }}>/</span>
-            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
-              {navGroups.flatMap(g => g.items).find(i => i.id === view)?.label ?? "Dashboard"}
+        <header className="top-bar">
+          {/* Hamburger — mobile only */}
+          <button
+            className="hamburger"
+            aria-label={sidebarOpen ? "Close navigation" : "Open navigation"}
+            aria-expanded={sidebarOpen}
+            aria-controls="sidebar"
+            onClick={() => setSidebarOpen(o => !o)}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+              {sidebarOpen
+                ? <><path d="M3 3l10 10M13 3L3 13"/></>
+                : <><path d="M2 4h12M2 8h12M2 12h12"/></>}
+            </svg>
+          </button>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}>
+            <span style={{ fontSize: 12, color: "var(--text-muted)", flexShrink: 0 }}>Feedback Atlas</span>
+            <span style={{ color: "var(--text-muted)", fontSize: 12 }} aria-hidden="true">/</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {currentLabel}
             </span>
           </div>
 
           {result && jobId && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button className="btn btn-secondary btn-sm" onClick={() => { setView("exports"); }}>
-                <Icon d="M8 12V4M4 8l4 4 4-4M2 14h12" size={13} />
-                Export
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+              <button className="btn btn-secondary btn-sm" onClick={() => navigate("exports")} aria-label="Export results">
+                <Icon d="M8 12V4M4 8l4 4 4-4M2 14h12" size={13} aria-hidden />
+                <span className="hide-mobile">Export</span>
               </button>
               {phase !== "idle" && (
-                <button className="btn btn-ghost btn-sm" onClick={handleReset} style={{ color: "var(--danger)" }}>
+                <button className="btn btn-ghost btn-sm" onClick={handleReset} style={{ color: "var(--danger)" }} aria-label="Reset analysis">
                   Reset
                 </button>
               )}
             </div>
           )}
-        </div>
+        </header>
 
         {/* Stats strip when result is ready */}
         {result && (
@@ -486,11 +529,11 @@ export default function App() {
         )}
 
         {/* Page content */}
-        <div className="page-content">
+        <main id="main-content" className="page-content">
           <div className="animate-fade-up">
             {renderView()}
           </div>
-        </div>
+        </main>
       </div>
 
       {/* Toast */}

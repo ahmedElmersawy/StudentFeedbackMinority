@@ -92,7 +92,7 @@ export function MismatchPanel({ result }: Props) {
       </div>
 
       {/* Two column lists */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 16 }}>
         {[
           { title: "High Mismatch", rows: high, filename: "high_mismatch.csv" },
           { title: "Reverse Mismatch", rows: reverse, filename: "reverse_mismatch.csv" },

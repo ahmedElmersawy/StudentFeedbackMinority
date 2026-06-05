@@ -69,7 +69,7 @@ export function DatasetManager({ tab, history, phase, jobMessage, jobProgress, r
           </div>
 
           {/* Format guide */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 16 }}>
             {[
               {
                 title: "CATME Peer Feedback",

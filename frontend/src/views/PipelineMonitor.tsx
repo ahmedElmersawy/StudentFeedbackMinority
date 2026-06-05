@@ -55,7 +55,7 @@ export function PipelineMonitor({ stages, log, phase, jobMessage, jobProgress, s
           : null;
         const etaStr = eta == null ? "—" : eta < 60 ? `${eta}s` : `${Math.floor(eta/60)}m ${eta%60}s`;
         return (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12 }}>
             {[
               { label: "Status",    value: phase === "done" ? "Complete" : isRunning ? "Running" : "Idle", color: phase === "done" ? "var(--success)" : isRunning ? "var(--brand)" : "var(--text-muted)" },
               { label: "Elapsed",   value: startTime ? formatDuration(elapsed) : "—",                       color: "var(--text-primary)" },

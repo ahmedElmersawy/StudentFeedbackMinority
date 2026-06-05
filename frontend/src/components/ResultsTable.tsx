@@ -81,6 +81,7 @@ export function ResultsTable({ rows, onDownloadCsv }: Props) {
             placeholder="Search feedback text…"
             value={search}
             onChange={e => { setSearch(e.target.value); setPage(0); }}
+            aria-label="Search feedback text"
           />
         </div>
 
@@ -118,8 +119,8 @@ export function ResultsTable({ rows, onDownloadCsv }: Props) {
         )}
       </div>
 
-      {/* Table */}
-      <div className="card" style={{ overflowX: "auto" }}>
+      {/* Table — horizontally scrollable on mobile */}
+      <div className="card table-wrap" role="region" aria-label="Results table" tabIndex={0}>
         <table className="data-table">
           <thead>
             <tr>
