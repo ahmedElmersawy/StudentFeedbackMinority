@@ -12,7 +12,7 @@ interface Props {
 
 type SortKey = "count" | "pct" | "confidence" | "minority" | "label";
 
-function LabelDetailPanel({ stat, jobId, total, onClose, onToast }: {
+function LabelDetailPanel({ stat, jobId, total: _total, onClose, onToast }: {
   stat: LabelStat; jobId: string; total: number; onClose: () => void; onToast: (m: string) => void;
 }) {
   const color = labelColor(stat.label, 0);

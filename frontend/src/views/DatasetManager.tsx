@@ -25,7 +25,7 @@ function StatBadge({ label, value, color }: { label: string; value: number | str
   );
 }
 
-export function DatasetManager({ tab, history, phase, jobMessage, jobProgress, result, onUpload, onReset }: Props) {
+export function DatasetManager({ tab, history, phase, jobMessage, jobProgress, result: _result, onUpload, onReset }: Props) {
   const [search, setSearch] = useState("");
 
   const filtered = history.filter(h =>
