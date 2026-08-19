@@ -15,9 +15,14 @@ kill_timeout = "30s"
   PORT = "8000"
 
 [[mounts]]
-  source      = "model_weights"
-  destination = "/app/models"
-  initial_size = "20gb"
+  source      = "catme_weights"
+  destination = "/app/catme_feedback_classifier"
+  initial_size = "5gb"
+
+[[mounts]]
+  source      = "professor_weights"
+  destination = "/app/professor_feedback_classifier"
+  initial_size = "5gb"
 
 [[vm]]
   memory = "8gb"

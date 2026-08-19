@@ -31,9 +31,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy source
 COPY backend/ /app/backend/
 
-# Models are mounted at runtime — see docker-compose.prod.yml
-# catme_feedback_classifier/     → /app/catme_feedback_classifier
-# professor_feedback_classifier/ → /app/professor_feedback_classifier
+# Models: baked into the image for platforms without a volume-mount step
+# (e.g. Railway). On Fly.io these paths are shadowed by mounted volumes.
+COPY catme_feedback_classifier/ /app/catme_feedback_classifier/
+COPY professor_feedback_classifier/ /app/professor_feedback_classifier/
 
 ENV PYTHONPATH=/app \
     PYTHONDONTWRITEBYTECODE=1 \
