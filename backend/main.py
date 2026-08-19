@@ -123,7 +123,12 @@ def predict(req: PredictRequest):
 
         df = pd.DataFrame({"text": [req.text]})
         mode = req.feedback_mode or detect_feedback_mode([req.text])
-        result = run_inference(df, model_dir=req.model_dir)
+        model_dir = req.model_dir
+        if model_dir is None:
+            cfg = _cfg()
+            key = "professor_output_dir" if mode == "student_to_professor" else "catme_output_dir"
+            model_dir = cfg.get("model", {}).get(key)
+        result = run_inference(df, model_dir=model_dir)
         row = result.iloc[0]
         pred = str(row["prediction"])
         conf = float(row["confidence"])
