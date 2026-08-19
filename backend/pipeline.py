@@ -1,6 +1,7 @@
 """End-to-end inference pipeline: ingest → classify → minority detect → mismatch → priority."""
 from __future__ import annotations
 
+import gc
 import io
 import logging
 import os
@@ -590,6 +591,7 @@ def run_inference(
                 # resident at once — evict other cached models before loading.
                 if _model_cache and os.environ.get("SINGLE_MODEL_CACHE", "").lower() in ("1", "true"):
                     _model_cache.clear()
+                    gc.collect()  # nn.Module reference cycles aren't freed by refcounting alone
                 logger.info("[inference] Loading model from %s (first time — caching for reuse)", mdir)
 
                 if progress_callback:
