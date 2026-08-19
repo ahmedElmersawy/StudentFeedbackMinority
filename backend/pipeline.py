@@ -586,6 +586,10 @@ def run_inference(
         # Second thread waits here and uses the cached result after the first finishes.
         with _model_load_lock:
             if cache_key not in _model_cache:   # re-check inside lock
+                # Deployments with limited RAM can't hold multiple large models
+                # resident at once — evict other cached models before loading.
+                if _model_cache and os.environ.get("SINGLE_MODEL_CACHE", "").lower() in ("1", "true"):
+                    _model_cache.clear()
                 logger.info("[inference] Loading model from %s (first time — caching for reuse)", mdir)
 
                 if progress_callback:
