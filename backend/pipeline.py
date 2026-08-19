@@ -602,7 +602,7 @@ def run_inference(
                 if progress_callback:
                     progress_callback(0, 0, 0)
 
-                model = AutoModelForSequenceClassification.from_pretrained(mdir)
+                model = AutoModelForSequenceClassification.from_pretrained(mdir, torch_dtype="auto")
                 model.eval()
                 id2label = {int(k): v for k, v in model.config.id2label.items()}
 
@@ -654,11 +654,9 @@ def run_inference(
             try:
                 enc = {k: v.to(device) for k, v in enc.items()}
                 logits = model(**enc).logits
-                if device == "cuda":
-                    # Keep on GPU until we need CPU arrays
-                    probs = torch.softmax(logits.float(), dim=1)
-                else:
-                    probs = torch.softmax(logits, dim=1)
+                # logits tensor is tiny (batch_size x num_classes) — always upcast for
+                # softmax so fp16 weight loading doesn't depend on CPU half-precision op support
+                probs = torch.softmax(logits.float(), dim=1)
             except torch.OutOfMemoryError:
                 torch.cuda.empty_cache()
                 device = "cpu"
