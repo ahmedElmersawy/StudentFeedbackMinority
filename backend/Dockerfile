@@ -8,7 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt .
+# CPU-only torch wheel — the default PyPI wheel bundles the full CUDA/cuDNN
+# stack, which alone adds ~500-600MB of resident memory on import even when
+# no GPU is present. If you switch to a GPU instance, drop this line so pip
+# pulls the CUDA-enabled wheel instead.
 RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
  && pip install --no-cache-dir -r requirements.txt
 
 # Download spaCy model
