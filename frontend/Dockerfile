@@ -20,7 +20,16 @@ FROM nginx:alpine
 RUN rm /etc/nginx/conf.d/default.conf
 
 COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx/nginx.conf /etc/nginx/nginx.conf
+
+# nginx/nginx.conf (default, full config replacing /etc/nginx/nginx.conf)
+# proxies /api to a "backend" upstream — only resolvable under Docker
+# Compose's shared network. For a split deploy where the frontend calls
+# VITE_API_URL directly (e.g. separate Railway services), override both
+# build args to use frontend/nginx.conf (a bare server block dropped into
+# conf.d, stock nginx.conf left in place) — it just serves the static SPA.
+ARG NGINX_CONF=nginx/nginx.conf
+ARG NGINX_DEST=/etc/nginx/nginx.conf
+COPY ${NGINX_CONF} ${NGINX_DEST}
 
 EXPOSE 80
 
