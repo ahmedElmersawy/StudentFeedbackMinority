@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/ahmedElmersawy/StudentFeedbackMinority/actions/workflows/deploy.yml/badge.svg)](https://github.com/ahmedElmersawy/StudentFeedbackMinority/actions/workflows/deploy.yml)
 
-**🔗 Live Demo:** https://feedback-atlas-frontend-production.up.railway.app
+**🔗 Live Demo:** https://von-equal-decision-bike.trycloudflare.com
 
 Upload a CSV of student feedback and get back:
 - **Label classification** across 11 CATME or 24 professor dimensions
