@@ -571,7 +571,13 @@ def run_inference(
 ) -> pd.DataFrame:
     """Run the fine-tuned classifier on df['text']."""
     import torch
-    torch.set_num_threads(os.cpu_count() or 1)
+    # Cap CPU threads instead of using every core. GPU inference barely touches
+    # these threads at all, so on a heavily shared multi-tenant host (e.g. an
+    # HPC login node with 100+ cores under contention from other users' jobs),
+    # spawning one thread per core turned model load into a multi-minute stall
+    # (thread-pool init + OS scheduling contention), not GPU work.
+    _num_threads = int(os.environ.get("TORCH_NUM_THREADS", "4"))
+    torch.set_num_threads(min(_num_threads, os.cpu_count() or 1))
 
     cfg = _cfg()
     bs = batch_size or cfg.get("model", {}).get("batch_size", 32)
