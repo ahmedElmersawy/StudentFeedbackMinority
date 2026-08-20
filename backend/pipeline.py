@@ -1154,9 +1154,12 @@ def check_success_criteria(df: pd.DataFrame, feedback_mode: str) -> dict:
         results["majority_positive_pct"] = round(float(majority_pct), 1)
         results["negative_labeled_count"] = int(negative_count)
         results["real_minority_count"] = int(real_minority)
-        results["pass_majority_pct"] = majority_pct < 30
-        results["pass_negative_count"] = negative_count >= 3000
-        results["pass_minority_count"] = real_minority >= 500
+        # bool(...) here: majority_pct/negative_count/real_minority are numpy
+        # scalars (from .mean()/.sum()), and comparing them yields numpy.bool_,
+        # which FastAPI's JSON encoder can't serialize — cast to native bool.
+        results["pass_majority_pct"] = bool(majority_pct < 30)
+        results["pass_negative_count"] = bool(negative_count >= 3000)
+        results["pass_minority_count"] = bool(real_minority >= 500)
         results["no_crash"] = True
 
     elif feedback_mode == "student_to_professor":
@@ -1170,8 +1173,8 @@ def check_success_criteria(df: pd.DataFrame, feedback_mode: str) -> dict:
         results["majority_positive_pct"] = round(float(majority_pct), 1)
         results["n_label_categories"] = int(n_categories)
         results["real_minority_count"] = int(real_minority)
-        results["pass_majority_pct"] = majority_pct < 30
-        results["pass_label_spread"] = n_categories >= 8
-        results["pass_minority_count"] = real_minority > 0
+        results["pass_majority_pct"] = bool(majority_pct < 30)
+        results["pass_label_spread"] = bool(n_categories >= 8)
+        results["pass_minority_count"] = bool(real_minority > 0)
 
     return results
